@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+
+# Database files
+*.db
+
+# System / DLL files
+*.dll
+*.exe
+
+# Git folder accidentally included
+Git/
+
+# Ignore anything compiled
+*.so
+*.pyd
+
+# Environment variables
+.env
