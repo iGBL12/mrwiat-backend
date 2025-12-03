@@ -1,0 +1,17 @@
+﻿# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+
+# External tools and binaries
+*.exe
+*.dll
+*.db
+Git/
+Programming Tools/
+
+# Env file
+.env
