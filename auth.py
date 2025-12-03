@@ -1,53 +1,60 @@
 # auth.py
-import hashlib
-import hmac
-from urllib.parse import parse_qsl
-from typing import Optional, Dict
 import os
+import hmac
+import hashlib
+import json
+from urllib.parse import parse_qsl
 
-from dotenv import load_dotenv
-
-load_dotenv()
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # سنضعه في .env
+# نستخدم نفس المتغير الذي يستخدمه bot.py
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 if not BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN not set in .env")
+    raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
 
-def verify_telegram_init_data(init_data: str) -> Optional[Dict]:
+def verify_telegram_init_data(init_data: str) -> dict | None:
     """
-    Verify Telegram WebApp initData string.
-    Returns user dict if valid, else None.
+    التحقق من init_data حسب توثيق تيليجرام:
+    https://core.telegram.org/bots/webapps#validating-data-received-via-mini-apps
+
+    تعيد dict لمعلومات المستخدم (id, first_name, username) أو None لو فشل التحقق.
     """
     if not init_data:
         return None
 
-    # Parse key=value&key2=value2 ...
-    data = dict(parse_qsl(init_data, strict_parsing=True))
+    # 1) نحول init_data من query string إلى dict
+    data = dict(parse_qsl(init_data, keep_blank_values=True))
 
-    if "hash" not in data:
+    # 2) نأخذ الـ hash المُرسل ونزيله من البيانات
+    received_hash = data.pop("hash", None)
+    if not received_hash:
         return None
 
-    hash_received = data.pop("hash")
-
-    # Build data_check_string
+    # 3) نكوّن data_check_string بترتيب المفاتيح أبجديًّا
     data_check_arr = [f"{k}={v}" for k, v in sorted(data.items())]
     data_check_string = "\n".join(data_check_arr)
 
-    # Secret key
-    secret_key = hashlib.sha256(f"WebAppData{BOT_TOKEN}".encode()).digest()
+    # 4) نحتسب HMAC باستخدام sha256(bot_token)
+    secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+    calc_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
-    # Calculate HMAC-SHA256
-    hmac_calculated = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-    if hmac_calculated != hash_received:
+    # 5) لو الـ hash غير مطابق → init data غير صحيحة
+    if not hmac.compare_digest(calc_hash, received_hash):
         return None
 
-    # If valid, extract user JSON
-    import json
+    # 6) نفك JSON الخاص بالمستخدم ونرجعه على شكل dict
     user_json = data.get("user")
     if not user_json:
         return None
 
-    user = json.loads(user_json)
-    return user
+    try:
+        user_data = json.loads(user_json)
+    except json.JSONDecodeError:
+        return None
+
+    # الآن user_data يحتوي: id, first_name, username, ...
+    return user_data
