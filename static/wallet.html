@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Mrwiat Wallet</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <h1>💰 Mrwiat Wallet</h1>
+  <div id="info">Loading...</div>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+
+    const initData = tg.initData;      // السلسلة الطويلة من تيليجرام
+
+    async function loadWallet() {
+      try {
+        const res = await fetch("https://YOUR-BACKEND-DOMAIN/wallet/webapp", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ init_data: initData })
+        });
+
+        if (!res.ok) {
+          document.getElementById("info").innerText = "Unauthorized or error";
+          return;
+        }
+
+        const data = await res.json();
+        document.getElementById("info").innerText =
+          `User: ${data.first_name || ""} (ID: ${data.telegram_id})\n` +
+          `Balance: ${data.balance} ${data.currency}`;
+      } catch (err) {
+        document.getElementById("info").innerText = "Error loading wallet";
+      }
+    }
+
+    loadWallet();
+  </script>
+</body>
+</html>
