@@ -29,18 +29,21 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-# نستخدم gpt-4.1 افتراضياً لجودة أعلى، ويمكن تغييره من المتغيرات
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+# نستخدم gpt-4.1-mini افتراضياً، ويمكن تغييره من المتغيرات
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
 if not OPENAI_API_KEY:
     logger.warning("OPENAI_API_KEY is not set. Story generation will fail.")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
+    client = None
+else:
+    # ✅ استخدام عميل OpenAI الجديد بدون أي معاملات إضافية
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =============== ثوابت الحالات في المحادثة ===============
+
 STATE_STORY_GENRE = 1      # اختيار نوع القصة
 STATE_STORY_BRIEF = 2      # وصف فكرة القصة
 STATE_PUBLISH_STORY = 3    # نص القصة التي يريد المستخدم نشرها
@@ -66,6 +69,7 @@ GENRE_KEYBOARD = ReplyKeyboardMarkup(
 )
 
 # =============== SYSTEM PROMPT المتخصص لمرويات ===============
+
 SYSTEM_PROMPT = """
 أنت كاتب قصص عربي محترف تعمل لصالح منصة "مرويات".
 مهمتك إنتاج قصص بجودة عالية، لغة ممتعة، وحبكة جذابة، مع أسلوب سرد خاص يتميّز بما يلي:
@@ -103,8 +107,8 @@ SYSTEM_PROMPT = """
 هدفك النهائي هو كتابة قصة ممتعة بجودة عالية تجعل القارئ يشعر بأنه يشاهد فيلمًا قصيرًا مكتوبًا بإتقان.
 """
 
-
 # =============== /start ===============
+
 def start(update: Update, context: CallbackContext) -> None:
     """رسالة ترحيب بسيطة مع توضيح الأوامر المتاحة + الأزرار."""
     update.message.reply_text(
@@ -117,8 +121,8 @@ def start(update: Update, context: CallbackContext) -> None:
         reply_markup=MAIN_KEYBOARD,
     )
 
-
 # =============== /write — خطوة 1: اختيار نوع القصة ===============
+
 def write_command(update: Update, context: CallbackContext) -> int:
     """يبدأ محادثة إنشاء قصة جديدة: أولاً يسأل عن نوع القصة."""
     if update.effective_chat.type != "private":
@@ -141,7 +145,7 @@ def handle_story_genre(update: Update, context: CallbackContext) -> int:
     """يستقبل نوع القصة من المستخدم ثم يطلب منه وصف الفكرة."""
     genre_text = (update.message.text or "").strip()
 
-    # نخزن نوع القصة كما هو (يمكننا تبسيطه لاحقاً إن احتجنا)
+    # نخزن نوع القصة كما هو
     context.user_data["story_genre"] = genre_text
 
     update.message.reply_text(
@@ -156,12 +160,12 @@ def handle_story_genre(update: Update, context: CallbackContext) -> int:
 
     return STATE_STORY_BRIEF
 
-
 # =============== دالة استدعاء OpenAI مع النوع + الفكرة ===============
+
 def generate_story_with_openai(brief: str, genre: str, username: str = "") -> str:
     """يستدعي OpenAI لكتابة قصة عربية بناءً على النوع + الوصف."""
 
-    if not OPENAI_API_KEY:
+    if client is None:
         return "❌ لا يوجد إعداد لمفتاح OpenAI حالياً (OPENAI_API_KEY)."
 
     user_prompt = (
@@ -187,7 +191,6 @@ def generate_story_with_openai(brief: str, genre: str, username: str = "") -> st
         logger.exception("OpenAI error: %s", e)
         return "❌ حدث خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي. حاول مرة أخرى لاحقاً."
 
-
 def receive_story_brief(update: Update, context: CallbackContext) -> int:
     """يستقبل وصف القصة، يستدعي OpenAI، ويرسل القصة الناتجة للمستخدم."""
     brief = (update.message.text or "").strip()
@@ -211,6 +214,7 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
         update.message.reply_text(story_text, reply_markup=MAIN_KEYBOARD)
         return ConversationHandler.END
 
+    # تقسيم القصة على عدة رسائل حتى لا نتجاوز حد تيليجرام
     MAX_LEN = 3500
     chunks = wrap(story_text, MAX_LEN, break_long_words=False, replace_whitespace=False)
 
@@ -228,8 +232,8 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-
 # =============== /publish — نشر قصة كتبها المستخدم ===============
+
 def publish_command(update: Update, context: CallbackContext) -> int:
     """يبدأ محادثة استقبال قصة من المستخدم."""
     if update.effective_chat.type != "private":
@@ -251,7 +255,6 @@ def publish_command(update: Update, context: CallbackContext) -> int:
     )
 
     return STATE_PUBLISH_STORY
-
 
 def receive_publish_story(update: Update, context: CallbackContext) -> int:
     """يستقبل نص القصة من المستخدم ويتحقق من عدد الكلمات."""
@@ -292,8 +295,8 @@ def receive_publish_story(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-
 # =============== /cancel — إلغاء أي محادثة ===============
+
 def cancel(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
         "تم إلغاء العملية. يمكنك البدء من جديد بالأزرار أو بالأوامر:\n"
@@ -302,15 +305,16 @@ def cancel(update: Update, context: CallbackContext) -> int:
     )
     return ConversationHandler.END
 
-
 # =============== main ===============
+
 def main() -> None:
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
+    # /start
     dp.add_handler(CommandHandler("start", start))
 
-    # محادثة كتابة قصة بالذكاء الاصطناعي (نوع + فكرة)
+    # محادثة كتابة قصة بالذكاء الاصطناعي
     story_conv = ConversationHandler(
         entry_points=[
             CommandHandler("write", write_command),
@@ -356,7 +360,6 @@ def main() -> None:
 
     updater.start_polling()
     updater.idle()
-
 
 if __name__ == "__main__":
     main()
