@@ -635,10 +635,8 @@ def handle_video_idea(update: Update, context: CallbackContext) -> int:
         update.message.reply_text("❗ لم أستطع قراءة فكرة الفيديو، أعد كتابتها من فضلك.")
         return STATE_VIDEO_IDEA
 
-    # نخزن الفكرة في user_data
     context.user_data["video_idea"] = idea
 
-    # نسأل عن مدة الفيديو
     duration_keyboard = ReplyKeyboardMarkup(
         [["5", "10", "15", "20"]],
         resize_keyboard=True,
@@ -680,7 +678,6 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
         )
         return ConversationHandler.END
 
-    # نخزن المدة في user_data لاستخدامها لاحقاً
     context.user_data["video_duration_seconds"] = seconds
 
     user = update.effective_user
@@ -897,8 +894,14 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
             prompt=refined_prompt,
             size="1024x1024",
             n=1,
+            response_format="url",  # ✅ مهم جداً: نطلب URL
         )
+
+        if not img_resp.data or not getattr(img_resp.data[0], "url", None):
+            raise RuntimeError("No URL returned from OpenAI Images")
+
         image_url = img_resp.data[0].url
+
     except Exception as e:
         logger.exception("OpenAI image generation error: %s", e)
         update.message.reply_text(
