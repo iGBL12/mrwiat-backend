@@ -1000,7 +1000,7 @@ def main() -> None:
                 video_command,
             ),
         ],
-        states={
+        states=[
             STATE_VIDEO_IDEA: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_idea)
             ],
