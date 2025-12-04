@@ -1,4 +1,5 @@
 # bot.py
+import base64
 import os
 import logging
 import json
@@ -401,7 +402,66 @@ def publish_command(update: Update, context: CallbackContext) -> int:
 
     return STATE_PUBLISH_STORY
 
-def handle_pdf_story(update: Update, context: CallbackContext) -> int:
+def handle_image_prompt(update: Update, context: CallbackContext) -> int:
+    """يستقبل وصف الصورة وينتج صورة باستخدام OpenAI Images ويرسلها كت ملف مباشرة لتليجرام."""
+    desc = (update.message.text or "").strip()
+    if not desc:
+        update.message.reply_text("❗ لم أستطع قراءة وصف الصورة، أعد كتابته من فضلك.")
+        return STATE_IMAGE_PROMPT
+
+    update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة...")
+
+    refined_prompt = generate_image_prompt_with_openai(desc)
+    if not refined_prompt:
+        update.message.reply_text(
+            "❌ حدث خطأ أثناء تجهيز برومبت الصورة. حاول مرة أخرى.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    if client is None:
+        update.message.reply_text(
+            "❌ إعداد OpenAI Images غير مكتمل حالياً.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    try:
+        # نطلب الصورة بصيغة base64 من OpenAI
+        img_resp = client.images.generate(
+            model="gpt-image-1",
+            prompt=refined_prompt,
+            size="1024x1024",
+            n=1,
+            response_format="b64_json",
+        )
+
+        if not img_resp.data or not getattr(img_resp.data[0], "b64_json", None):
+            raise RuntimeError("No image data returned from OpenAI Images")
+
+        b64_data = img_resp.data[0].b64_json
+        image_bytes = base64.b64decode(b64_data)
+
+        bio = BytesIO(image_bytes)
+        bio.name = "mrwiat_image.png"
+        bio.seek(0)
+
+        caption = (
+            "🖼 هذه هي الصورة الناتجة عن وصفك.\n"
+            "إذا أعجبتك، يمكنك حفظها أو استخدامها كغلاف لقصة في مرويات."
+        )
+        update.message.reply_photo(photo=bio, caption=caption, reply_markup=MAIN_KEYBOARD)
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.exception("OpenAI image generation error: %s", e)
+        update.message.reply_text(
+            f"❌ حدث خطأ أثناء توليد الصورة من OpenAI:\n`{type(e).__name__}: {e}`",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
     """يستقبل ملف PDF من المستخدم، يستخرج النص، يراجعه، ثم ينشره إذا كان مناسباً."""
     doc = update.message.document
 
