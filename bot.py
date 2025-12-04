@@ -291,6 +291,7 @@ def generate_story_with_openai(brief: str, genre: str, username: str = "") -> st
         logger.exception("OpenAI error: %s", e)
         return "❌ حدث خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي. حاول مرة أخرى لاحقاً."
 
+
 def receive_story_brief(update: Update, context: CallbackContext) -> int:
     """يستقبل وصف القصة، يستدعي OpenAI، ويرسل القصة الناتجة للمستخدم."""
     brief = (update.message.text or "").strip()
@@ -402,66 +403,8 @@ def publish_command(update: Update, context: CallbackContext) -> int:
 
     return STATE_PUBLISH_STORY
 
-def handle_image_prompt(update: Update, context: CallbackContext) -> int:
-    """يستقبل وصف الصورة وينتج صورة باستخدام OpenAI Images ويرسلها كت ملف مباشرة لتليجرام."""
-    desc = (update.message.text or "").strip()
-    if not desc:
-        update.message.reply_text("❗ لم أستطع قراءة وصف الصورة، أعد كتابته من فضلك.")
-        return STATE_IMAGE_PROMPT
 
-    update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة...")
-
-    refined_prompt = generate_image_prompt_with_openai(desc)
-    if not refined_prompt:
-        update.message.reply_text(
-            "❌ حدث خطأ أثناء تجهيز برومبت الصورة. حاول مرة أخرى.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return ConversationHandler.END
-
-    if client is None:
-        update.message.reply_text(
-            "❌ إعداد OpenAI Images غير مكتمل حالياً.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return ConversationHandler.END
-
-    try:
-        # نطلب الصورة بصيغة base64 من OpenAI
-        img_resp = client.images.generate(
-            model="gpt-image-1",
-            prompt=refined_prompt,
-            size="1024x1024",
-            n=1,
-            response_format="b64_json",
-        )
-
-        if not img_resp.data or not getattr(img_resp.data[0], "b64_json", None):
-            raise RuntimeError("No image data returned from OpenAI Images")
-
-        b64_data = img_resp.data[0].b64_json
-        image_bytes = base64.b64decode(b64_data)
-
-        bio = BytesIO(image_bytes)
-        bio.name = "mrwiat_image.png"
-        bio.seek(0)
-
-        caption = (
-            "🖼 هذه هي الصورة الناتجة عن وصفك.\n"
-            "إذا أعجبتك، يمكنك حفظها أو استخدامها كغلاف لقصة في مرويات."
-        )
-        update.message.reply_photo(photo=bio, caption=caption, reply_markup=MAIN_KEYBOARD)
-        return ConversationHandler.END
-
-    except Exception as e:
-        logger.exception("OpenAI image generation error: %s", e)
-        update.message.reply_text(
-            f"❌ حدث خطأ أثناء توليد الصورة من OpenAI:\n`{type(e).__name__}: {e}`",
-            parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return ConversationHandler.END
-
+def handle_pdf_story(update: Update, context: CallbackContext) -> int:
     """يستقبل ملف PDF من المستخدم، يستخرج النص، يراجعه، ثم ينشره إذا كان مناسباً."""
     doc = update.message.document
 
@@ -633,6 +576,7 @@ def video_command(update: Update, context: CallbackContext) -> int:
     )
     return STATE_VIDEO_IDEA
 
+
 def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: str = ""):
     """يستخدم OpenAI إما لطلب تفاصيل إضافية أو لصنع برومبت نهائي للفيديو."""
     if client is None:
@@ -657,6 +601,7 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
     except Exception as e:
         logger.exception("OpenAI video prompt error: %s", e)
         return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
+
 
 def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "16:9"):
     """يرسل طلب إنشاء فيديو إلى Runway (هيكل مبدئي، عدّل حسب مستندات Runway)."""
@@ -688,6 +633,7 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
         logger.exception("Runway API error: %s", e)
         return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
 
+
 def handle_video_idea(update: Update, context: CallbackContext) -> int:
     """يستقبل فكرة الفيديو ثم يطلب من المستخدم اختيار المدة."""
     idea = (update.message.text or "").strip()
@@ -710,6 +656,7 @@ def handle_video_idea(update: Update, context: CallbackContext) -> int:
     )
 
     return STATE_VIDEO_DURATION
+
 
 def handle_video_duration(update: Update, context: CallbackContext) -> int:
     """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت."""
@@ -814,6 +761,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
     )
     return ConversationHandler.END
 
+
 def handle_video_clarify(update: Update, context: CallbackContext) -> int:
     """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح."""
     extra = (update.message.text or "").strip()
@@ -904,6 +852,7 @@ def image_command(update: Update, context: CallbackContext) -> int:
     )
     return STATE_IMAGE_PROMPT
 
+
 def generate_image_prompt_with_openai(description: str) -> str:
     """يحوّل وصف بالعربية إلى برومبت إنجليزي احترافي للصور."""
     if client is None:
@@ -923,6 +872,7 @@ def generate_image_prompt_with_openai(description: str) -> str:
     except Exception as e:
         logger.exception("OpenAI image prompt error: %s", e)
         return ""
+
 
 def handle_image_prompt(update: Update, context: CallbackContext) -> int:
     """يستقبل وصف الصورة وينتج صورة باستخدام OpenAI Images."""
@@ -949,12 +899,12 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
     try:
+        # نستخدم الإعداد الافتراضي (URL) بدون response_format لتجنب أي خطأ
         img_resp = client.images.generate(
             model="gpt-image-1",
             prompt=refined_prompt,
             size="1024x1024",
             n=1,
-            response_format="url",  # ✅ مهم جداً: نطلب URL
         )
 
         if not img_resp.data or not getattr(img_resp.data[0], "url", None):
@@ -1086,6 +1036,7 @@ def main() -> None:
 
     updater.start_polling()
     updater.idle()
+
 
 if __name__ == "__main__":
     main()
