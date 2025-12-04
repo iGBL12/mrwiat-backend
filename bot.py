@@ -21,6 +21,7 @@ from telegram.ext import (
 
 from openai import OpenAI
 import PyPDF2
+import requests
 
 # =============== الإعدادات العامة ===============
 
@@ -32,8 +33,14 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-# نستخدم gpt-4.1-mini افتراضياً، ويمكن تغييره من المتغيرات
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+# مفتاح Runway لإنتاج الفيديو
+RUNWAY_API_KEY = os.environ.get("RUNWAY_API_KEY")
+RUNWAY_API_URL = os.environ.get(
+    "RUNWAY_API_URL",
+    "https://api.runwayml.com/v1/generations",  # عدل هذا لو اختلف في المستندات الرسمية
+)
 
 # القروب / القناة التي سيتم النشر فيها عند الموافقة على القصة
 COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")  # مثال: -1001234567890
@@ -49,15 +56,19 @@ else:
 
 # =============== ثوابت الحالات في المحادثة ===============
 
-STATE_STORY_GENRE = 1      # اختيار نوع القصة
-STATE_STORY_BRIEF = 2      # وصف فكرة القصة
-STATE_PUBLISH_STORY = 3    # نص القصة أو PDF الذي يريد المستخدم نشره
+STATE_STORY_GENRE = 1       # اختيار نوع القصة
+STATE_STORY_BRIEF = 2       # وصف فكرة القصة
+STATE_PUBLISH_STORY = 3     # نص القصة أو PDF الذي يريد المستخدم نشره
+STATE_VIDEO_IDEA = 4        # الفكرة الأولية للفيديو
+STATE_VIDEO_CLARIFY = 5     # إجابات المستخدم على أسئلة التوضيح
+STATE_IMAGE_PROMPT = 6      # وصف الصورة
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["✍️ كتابة قصة بالذكاء الاصطناعي"],
         ["📤 نشر قصة من كتابتك"],
+        ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
     ],
     resize_keyboard=True,
 )
@@ -144,6 +155,57 @@ REVIEW_PROMPT = """
 لا تُرجع أي شيء خارج JSON، ولا تستخدم تعليقات أو نصوص أخرى.
 """
 
+# =============== SYSTEM PROMPT لمساعدة برومبت الفيديو (Runway) ===============
+
+VIDEO_PROMPT_SYSTEM = """
+أنت خبير في صناعة برومبت احترافي لمولد فيديو مثل Runway Gen-2.
+
+مهمتك:
+1. استلام وصف لفكرة فيديو من المستخدم (غالباً بالعربية).
+2. تقييم وضوح الفكرة.
+3. إذا كانت الفكرة غير كافية، اطلب تفاصيل إضافية عن:
+   - الشخصيات (العمر، الشكل، الملابس)
+   - المكان (مدينة، غرفة، طبيعة، ليل/نهار)
+   - أسلوب التصوير (سينمائي، لقطة ثابتة، حركة كاميرا...)
+   - المزاج (غامض، مرح، رعب، حزين...)
+   - مدة الفيديو (مثلاً 5–10 ثوانٍ، 10–20 ثانية).
+4. إذا كانت الفكرة كافية، أنشئ برومبت نهائي باللغة الإنجليزية، مفصل وواضح وجاهز للإرسال إلى Runway.
+
+أعد النتيجة دائماً في صيغة JSON فقط بهذا الشكل:
+
+إذا كانت الفكرة غير واضحة بما يكفي:
+{
+  "status": "need_more",
+  "questions": [
+    "اكتب هنا سؤالاً بالعربية لطلب تفاصيل أكثر...",
+    "سؤال آخر لو أردت..."
+  ]
+}
+
+إذا كانت الفكرة واضحة ومكتملة:
+{
+  "status": "ok",
+  "final_prompt": "English detailed prompt for Runway...",
+  "duration_seconds": 10,
+  "aspect_ratio": "16:9"
+}
+
+لا تخرج عن هذا الشكل أبداً، ولا تضف أي نص خارجه.
+"""
+
+# =============== SYSTEM PROMPT لتحويل وصف صورة إلى برومبت صور احترافي ===============
+
+IMAGE_PROMPT_SYSTEM = """
+أنت مهندس برومبت للصور (Image Prompt Engineer) تعمل مع نموذج صور متقدم.
+
+مهمتك:
+- استلام وصف صورة من المستخدم (غالباً بالعربية).
+- تحويله إلى برومبت باللغة الإنجليزية، مفصل وواضح، يناسب نموذج صور مثل DALL·E / GPT-Image.
+- أضف تفاصيل عن الإضاءة، الأسلوب الفني، زاوية الكاميرا إذا لزم.
+
+أعد النتيجة كنص واحد فقط: البرومبت باللغة الإنجليزية بدون أي شرح إضافي.
+"""
+
 # =============== /start ===============
 
 def start(update: Update, context: CallbackContext) -> None:
@@ -152,9 +214,11 @@ def start(update: Update, context: CallbackContext) -> None:
         "👋 أهلاً بك في بوت مرويات للقصص.\n\n"
         "المميزات المتاحة حالياً:\n"
         "1️⃣ ✍️ كتابة قصة جديدة بالذكاء الاصطناعي.\n"
-        "2️⃣ 📤 نشر قصة من كتابتك (نص أو ملف PDF، حد أدنى ~1000 كلمة).\n\n"
+        "2️⃣ 📤 نشر قصة من كتابتك (نص أو ملف PDF، حد أدنى ~1000 كلمة).\n"
+        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway).\n"
+        "4️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي (OpenAI Images).\n\n"
         "اختر من الأزرار بالأسفل أو استخدم الأوامر:\n"
-        "/write أو /publish.",
+        "/write أو /publish أو /video أو /image.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -293,9 +357,7 @@ def review_story_with_openai(text: str, username: str = ""):
         )
         raw = completion.choices[0].message.content.strip()
 
-        # محاولة قراءة JSON
         data = json.loads(raw)
-        # تأكيد الحقول الأساسية
         data.setdefault("approved", False)
         data.setdefault("word_count", len(text.split()))
         data.setdefault("title", "")
@@ -373,7 +435,6 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
         update.message.reply_text("❌ لم أتمكن من استخراج أي نص من ملف الـPDF. ربما يكون عبارة عن صور فقط.")
         return ConversationHandler.END
 
-    # يمكن تقصير النص إذا كان ضخماً جداً لتقليل التكلفة
     MAX_CHARS_FOR_REVIEW = 15000
     if len(cleaned_text) > MAX_CHARS_FOR_REVIEW:
         cleaned_text = cleaned_text[:MAX_CHARS_FOR_REVIEW]
@@ -398,7 +459,6 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
         update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
         return ConversationHandler.END
 
-    # القصة مقبولة للنشر
     msg = (
         f"✅ تم تحليل قصتك من ملف الـPDF.\n"
         f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n"
@@ -489,12 +549,325 @@ def receive_publish_story(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
+# =============== فيديو بالذكاء الاصطناعي (Runway) ===============
+
+def video_command(update: Update, context: CallbackContext) -> int:
+    """بدء محادثة إنتاج فيديو."""
+    if update.effective_chat.type != "private":
+        update.message.reply_text(
+            "🎬 لإنتاج فيديو بالذكاء الاصطناعي، تواصل معي في الخاص.\n"
+            "افتح البوت واضغط /video هناك.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "🎬 أهلاً بك في مختبر الفيديو في مرويات.\n\n"
+        "اكتب لي فكرة الفيديو التي تريدها، مثلاً:\n"
+        "• مشهد غموض في مدينة الرياض ليلاً مع ضباب.\n"
+        "• طفل يمشي في مكتبة قديمة، كاميرا من خلفه.\n"
+        "• لقطة سينمائية لجزيرة مهجورة وقت الغروب.\n\n"
+        "سأحاول فهم فكرتك، وإذا كانت غير واضحة سأطلب منك تفاصيل إضافية.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STATE_VIDEO_IDEA
+
+def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: str = ""):
+    """يستخدم OpenAI إما لطلب تفاصيل إضافية أو لصنع برومبت نهائي للفيديو."""
+    if client is None:
+        return {"status": "error", "error": "No OPENAI client configured."}
+
+    user_content = f"فكرة الفيديو من المستخدم @{username}:\n{idea}"
+    if extra_info:
+        user_content += f"\n\nإجابات إضافية من المستخدم:\n{extra_info}"
+
+    try:
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": VIDEO_PROMPT_SYSTEM},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.5,
+        )
+        raw = completion.choices[0].message.content.strip()
+        data = json.loads(raw)
+        return data
+    except Exception as e:
+        logger.exception("OpenAI video prompt error: %s", e)
+        return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
+
+def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "16:9"):
+    """يرسل طلب إنشاء فيديو إلى Runway (هيكل مبدئي، عدّل حسب مستندات Runway)."""
+    if not RUNWAY_API_KEY:
+        return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
+
+    headers = {
+        "Authorization": f"Bearer {RUNWAY_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": "gen2",  # عدّل حسب نموذج Runway الذي تستخدمه
+        "prompt": prompt,
+        "mode": "video",
+        "extra_params": {
+            "seconds": duration_seconds,
+            "aspect_ratio": aspect_ratio,
+        },
+    }
+
+    try:
+        resp = requests.post(RUNWAY_API_URL, headers=headers, json=payload, timeout=30)
+        if resp.status_code >= 400:
+            return {"ok": False, "error": f"Runway API error: {resp.status_code} {resp.text}"}
+        data = resp.json()
+        return {"ok": True, "data": data}
+    except Exception as e:
+        logger.exception("Runway API error: %s", e)
+        return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
+
+def handle_video_idea(update: Update, context: CallbackContext) -> int:
+    """يتعامل مع فكرة الفيديو الأولى."""
+    idea = (update.message.text or "").strip()
+    if not idea:
+        update.message.reply_text("❗ لم أستطع قراءة فكرة الفيديو، أعد كتابتها من فضلك.")
+        return STATE_VIDEO_IDEA
+
+    user = update.effective_user
+    username = user.username or user.first_name or "مستخدم"
+
+    update.message.reply_text("🔍 جاري تحليل فكرتك والتأكد من وضوحها...")
+
+    result = refine_video_prompt_with_openai(idea, username=username)
+    status = result.get("status")
+
+    if status == "need_more":
+        questions = result.get("questions", [])
+        if not questions:
+            update.message.reply_text(
+                "أحتاج بعض التفاصيل الإضافية عن الفيديو (الشخصيات، المكان، أسلوب التصوير، المزاج...). اكتبها في رسالة واحدة.",
+            )
+        else:
+            msg = "حتى أصنع برومبت فيديو قوي، أحتاج منك توضح لي هذه النقاط:\n\n"
+            for q in questions:
+                msg += f"- {q}\n"
+            msg += "\n✍️ أرسل إجاباتك في رسالة واحدة."
+            update.message.reply_text(msg)
+
+        context.user_data["video_idea"] = idea
+        return STATE_VIDEO_CLARIFY
+
+    if status == "ok":
+        final_prompt = result.get("final_prompt", "")
+        duration_seconds = int(result.get("duration_seconds", 10))
+        aspect_ratio = result.get("aspect_ratio", "16:9")
+
+        if not final_prompt:
+            update.message.reply_text(
+                "حدث خطأ في توليد برومبت الفيديو. حاول وصف فكرتك مرة أخرى بشكل أوضح.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return ConversationHandler.END
+
+        update.message.reply_text(
+            "✅ تم توليد برومبت احترافي للفيديو.\n"
+            "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو...",
+        )
+
+        runway_resp = create_runway_video_generation(
+            prompt=final_prompt,
+            duration_seconds=duration_seconds,
+            aspect_ratio=aspect_ratio,
+        )
+
+        if not runway_resp.get("ok"):
+            update.message.reply_text(
+                f"⚠️ تم تجهيز البرومبت، لكن حدث خطأ عند الإرسال إلى Runway:\n{runway_resp.get('error')}",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return ConversationHandler.END
+
+        data = runway_resp.get("data", {})
+        gen_id = data.get("id", "غير معروف")
+
+        update.message.reply_text(
+            "🚀 تم إرسال طلب الفيديو إلى Runway بنجاح.\n"
+            f"🆔 رقم الطلب: `{gen_id}`\n\n"
+            "يمكنك لاحقاً ربط النظام لاستقبال الفيديو النهائي تلقائياً.\n"
+            "حالياً، احتفظ برقم الطلب في حال احتجت تتبع الحالة.",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "❌ حدث خطأ أثناء تحليل فكرة الفيديو. حاول مرة أخرى لاحقاً.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    return ConversationHandler.END
+
+def handle_video_clarify(update: Update, context: CallbackContext) -> int:
+    """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح."""
+    extra = (update.message.text or "").strip()
+    idea = context.user_data.get("video_idea", "")
+
+    if not extra:
+        update.message.reply_text("❗ لم أستطع قراءة إجاباتك، أعد إرسالها من فضلك.")
+        return STATE_VIDEO_CLARIFY
+
+    user = update.effective_user
+    username = user.username or user.first_name or "مستخدم"
+
+    update.message.reply_text("🔧 شكراً للتفاصيل! جاري تجهيز برومبت الفيديو النهائي...")
+
+    result = refine_video_prompt_with_openai(idea, extra_info=extra, username=username)
+    status = result.get("status")
+
+    if status != "ok":
+        update.message.reply_text(
+            "❌ لم أتمكن من إنشاء برومبت نهائي للفيديو. حاول وصف فكرتك مرة أخرى من البداية.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    final_prompt = result.get("final_prompt", "")
+    duration_seconds = int(result.get("duration_seconds", 10))
+    aspect_ratio = result.get("aspect_ratio", "16:9")
+
+    if not final_prompt:
+        update.message.reply_text(
+            "حدث خطأ في توليد برومبت الفيديو. حاول وصف فكرتك مرة أخرى.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "✅ تم تجهيز برومبت احترافي للفيديو بعد الأخذ بتفاصيلك.\n"
+        "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو...",
+    )
+
+    runway_resp = create_runway_video_generation(
+        prompt=final_prompt,
+        duration_seconds=duration_seconds,
+        aspect_ratio=aspect_ratio,
+    )
+
+    if not runway_resp.get("ok"):
+        update.message.reply_text(
+            f"⚠️ تم تجهيز البرومبت، لكن حدث خطأ عند الإرسال إلى Runway:\n{runway_resp.get('error')}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    data = runway_resp.get("data", {})
+    gen_id = data.get("id", "غير معروف")
+
+    update.message.reply_text(
+        "🚀 تم إرسال طلب الفيديو إلى Runway بنجاح.\n"
+        f"🆔 رقم الطلب: `{gen_id}`\n\n"
+        "يمكنك لاحقاً ربط النظام لاستقبال الفيديو النهائي تلقائياً.",
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    return ConversationHandler.END
+
+# =============== صور بالذكاء الاصطناعي (OpenAI Images) ===============
+
+def image_command(update: Update, context: CallbackContext) -> int:
+    """بدء محادثة إنشاء صورة."""
+    if update.effective_chat.type != "private":
+        update.message.reply_text(
+            "🖼 لإنشاء صورة بالذكاء الاصطناعي، تواصل معي في الخاص.\n"
+            "افتح البوت واضغط /image هناك.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "🖼 رائع! اكتب وصف الصورة التي تريدها.\n"
+        "مثلاً:\n"
+        "• غلاف لقصة غموض في مدينة الرياض ليلاً مع ضباب.\n"
+        "• طفل يقرأ كتاباً في مكتبة قديمة، أسلوب كرتوني.\n"
+        "• منظر سينمائي لجزيرة مهجورة وقت الغروب.\n\n"
+        "سأحوّل وصفك إلى برومبت احترافي وأنتج لك صورة.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STATE_IMAGE_PROMPT
+
+def generate_image_prompt_with_openai(description: str) -> str:
+    """يحوّل وصف بالعربية إلى برومبت إنجليزي احترافي للصور."""
+    if client is None:
+        return ""
+
+    try:
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": IMAGE_PROMPT_SYSTEM},
+                {"role": "user", "content": description},
+            ],
+            temperature=0.7,
+        )
+        prompt = completion.choices[0].message.content.strip()
+        return prompt
+    except Exception as e:
+        logger.exception("OpenAI image prompt error: %s", e)
+        return ""
+
+def handle_image_prompt(update: Update, context: CallbackContext) -> int:
+    """يستقبل وصف الصورة وينتج صورة باستخدام OpenAI Images."""
+    desc = (update.message.text or "").strip()
+    if not desc:
+        update.message.reply_text("❗ لم أستطع قراءة وصف الصورة، أعد كتابته من فضلك.")
+        return STATE_IMAGE_PROMPT
+
+    update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة...")
+
+    refined_prompt = generate_image_prompt_with_openai(desc)
+    if not refined_prompt:
+        update.message.reply_text(
+            "❌ حدث خطأ أثناء تجهيز برومبت الصورة. حاول مرة أخرى.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    if client is None:
+        update.message.reply_text(
+            "❌ إعداد OpenAI Images غير مكتمل حالياً.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    try:
+        img_resp = client.images.generate(
+            model="gpt-image-1",
+            prompt=refined_prompt,
+            size="1024x1024",
+            n=1,
+        )
+        image_url = img_resp.data[0].url
+    except Exception as e:
+        logger.exception("OpenAI image generation error: %s", e)
+        update.message.reply_text(
+            "❌ حدث خطأ أثناء توليد الصورة من OpenAI.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    caption = (
+        "🖼 هذه هي الصورة الناتجة عن وصفك.\n"
+        "إذا أعجبتك، يمكنك حفظها أو استخدامها كغلاف لقصة في مرويات."
+    )
+    update.message.reply_photo(photo=image_url, caption=caption, reply_markup=MAIN_KEYBOARD)
+    return ConversationHandler.END
+
 # =============== /cancel — إلغاء أي محادثة ===============
 
 def cancel(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
         "تم إلغاء العملية. يمكنك البدء من جديد بالأزرار أو بالأوامر:\n"
-        "/write أو /publish.",
+        "/write أو /publish أو /video أو /image.",
         reply_markup=MAIN_KEYBOARD,
     )
     return ConversationHandler.END
@@ -505,10 +878,9 @@ def main() -> None:
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # /start
     dp.add_handler(CommandHandler("start", start))
 
-    # محادثة كتابة قصة بالذكاء الاصطناعي
+    # كتابة قصة بالذكاء الاصطناعي
     story_conv = ConversationHandler(
         entry_points=[
             CommandHandler("write", write_command),
@@ -530,7 +902,7 @@ def main() -> None:
     )
     dp.add_handler(story_conv)
 
-    # محادثة نشر قصة من كتابة المستخدم (نص أو PDF)
+    # نشر قصة من كتابة المستخدم (نص أو PDF)
     publish_conv = ConversationHandler(
         entry_points=[
             CommandHandler("publish", publish_command),
@@ -541,9 +913,7 @@ def main() -> None:
         ],
         states={
             STATE_PUBLISH_STORY: [
-                # استقبال ملفات PDF
                 MessageHandler(Filters.document.pdf, handle_pdf_story),
-                # استقبال نص عادي
                 MessageHandler(
                     Filters.text & ~Filters.command,
                     receive_publish_story,
@@ -554,6 +924,47 @@ def main() -> None:
         allow_reentry=True,
     )
     dp.add_handler(publish_conv)
+
+    # إنتاج فيديو بالذكاء الاصطناعي
+    video_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("video", video_command),
+            MessageHandler(
+                Filters.regex("^🎬 إنتاج فيديو بالذكاء الاصطناعي$"),
+                video_command,
+            ),
+        ],
+        states={
+            STATE_VIDEO_IDEA: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_idea)
+            ],
+            STATE_VIDEO_CLARIFY: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_clarify)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(video_conv)
+
+    # إنشاء صورة بالذكاء الاصطناعي
+    image_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("image", image_command),
+            MessageHandler(
+                Filters.regex("^🖼 إنشاء صورة بالذكاء الاصطناعي$"),
+                image_command,
+            ),
+        ],
+        states={
+            STATE_IMAGE_PROMPT: [
+                MessageHandler(Filters.text & ~Filters.command, handle_image_prompt)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(image_conv)
 
     updater.start_polling()
     updater.idle()
