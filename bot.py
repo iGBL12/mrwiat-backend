@@ -1000,7 +1000,7 @@ def main() -> None:
                 video_command,
             ),
         ],
-        states=[
+        states={
             STATE_VIDEO_IDEA: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_idea)
             ],
@@ -1010,7 +1010,7 @@ def main() -> None:
             STATE_VIDEO_CLARIFY: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_clarify)
             ],
-        ],
+        },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
