@@ -40,7 +40,7 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 RUNWAY_API_KEY = os.environ.get("RUNWAY_API_KEY")
 RUNWAY_API_URL = os.environ.get(
     "RUNWAY_API_URL",
-    "https://api.runwayml.com/v1/generations",
+    "https://api.dev.runwayml.com/v1/generations",
 )
 
 # القروب / القناة التي سيتم النشر فيها عند الموافقة على القصة
