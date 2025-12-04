@@ -1,5 +1,4 @@
 # bot.py
-import base64
 import os
 import logging
 import json
@@ -36,12 +35,13 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
-# مفتاح Runway لإنتاج الفيديو
+# مفاتيح Runway لإنتاج الفيديو
 RUNWAY_API_KEY = os.environ.get("RUNWAY_API_KEY")
 RUNWAY_API_URL = os.environ.get(
     "RUNWAY_API_URL",
-    "https://api.dev.runwayml.com/v1/generations",
+    "https://api.dev.runwayml.com/v1/generations",  # حسب رسالة الخطأ من Runway
 )
+RUNWAY_API_VERSION = os.environ.get("RUNWAY_API_VERSION", "2024-11-06")
 
 # القروب / القناة التي سيتم النشر فيها عند الموافقة على القصة
 COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")  # مثال: -1001234567890
@@ -291,6 +291,7 @@ def generate_story_with_openai(brief: str, genre: str, username: str = "") -> st
         logger.exception("OpenAI error: %s", e)
         return "❌ حدث خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي. حاول مرة أخرى لاحقاً."
 
+
 def receive_story_brief(update: Update, context: CallbackContext) -> int:
     """يستقبل وصف القصة، يستدعي OpenAI، ويرسل القصة الناتجة للمستخدم."""
     brief = (update.message.text or "").strip()
@@ -401,6 +402,7 @@ def publish_command(update: Update, context: CallbackContext) -> int:
     )
 
     return STATE_PUBLISH_STORY
+
 
 def handle_pdf_story(update: Update, context: CallbackContext) -> int:
     """يستقبل ملف PDF من المستخدم، يستخرج النص، يراجعه، ثم ينشره إذا كان مناسباً."""
@@ -574,6 +576,7 @@ def video_command(update: Update, context: CallbackContext) -> int:
     )
     return STATE_VIDEO_IDEA
 
+
 def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: str = ""):
     """يستخدم OpenAI إما لطلب تفاصيل إضافية أو لصنع برومبت نهائي للفيديو."""
     if client is None:
@@ -599,19 +602,20 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
         logger.exception("OpenAI video prompt error: %s", e)
         return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
 
+
 def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "16:9"):
-    """يرسل طلب إنشاء فيديو إلى Runway."""
+    """يرسل طلب إنشاء فيديو إلى Runway (هيكل مبدئي، عدّل حسب مستندات Runway)."""
     if not RUNWAY_API_KEY:
         return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
 
     headers = {
         "Authorization": f"Bearer {RUNWAY_API_KEY}",
         "Content-Type": "application/json",
-        "X-Runway-Version": "2024-09-26"
+        "X-Runway-Version": RUNWAY_API_VERSION,
     }
 
     payload = {
-        "model": "gen2",
+        "model": "gen2",  # عدّل حسب نموذج Runway الذي تستخدمه
         "prompt": prompt,
         "mode": "video",
         "extra_params": {
@@ -626,10 +630,10 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
             return {"ok": False, "error": f"Runway API error: {resp.status_code} {resp.text}"}
         data = resp.json()
         return {"ok": True, "data": data}
-
     except Exception as e:
         logger.exception("Runway API error: %s", e)
         return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
+
 
 def handle_video_idea(update: Update, context: CallbackContext) -> int:
     """يستقبل فكرة الفيديو ثم يطلب من المستخدم اختيار المدة."""
@@ -653,6 +657,7 @@ def handle_video_idea(update: Update, context: CallbackContext) -> int:
     )
 
     return STATE_VIDEO_DURATION
+
 
 def handle_video_duration(update: Update, context: CallbackContext) -> int:
     """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت."""
@@ -757,6 +762,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
     )
     return ConversationHandler.END
 
+
 def handle_video_clarify(update: Update, context: CallbackContext) -> int:
     """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح."""
     extra = (update.message.text or "").strip()
@@ -847,6 +853,7 @@ def image_command(update: Update, context: CallbackContext) -> int:
     )
     return STATE_IMAGE_PROMPT
 
+
 def generate_image_prompt_with_openai(description: str) -> str:
     """يحوّل وصف بالعربية إلى برومبت إنجليزي احترافي للصور."""
     if client is None:
@@ -866,6 +873,7 @@ def generate_image_prompt_with_openai(description: str) -> str:
     except Exception as e:
         logger.exception("OpenAI image prompt error: %s", e)
         return ""
+
 
 def handle_image_prompt(update: Update, context: CallbackContext) -> int:
     """يستقبل وصف الصورة وينتج صورة باستخدام OpenAI Images."""
@@ -897,7 +905,6 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
             prompt=refined_prompt,
             size="1024x1024",
             n=1,
-            response_format="url",
         )
 
         if not img_resp.data or not getattr(img_resp.data[0], "url", None):
@@ -1003,7 +1010,7 @@ def main() -> None:
             STATE_VIDEO_CLARIFY: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_clarify)
             ],
-        },
+        ],
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
