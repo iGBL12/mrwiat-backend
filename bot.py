@@ -62,6 +62,7 @@ STATE_PUBLISH_STORY = 3     # نص القصة أو PDF الذي يريد الم�
 STATE_VIDEO_IDEA = 4        # الفكرة الأولية للفيديو
 STATE_VIDEO_CLARIFY = 5     # إجابات المستخدم على أسئلة التوضيح
 STATE_IMAGE_PROMPT = 6      # وصف الصورة
+STATE_VIDEO_DURATION = 7    # مدة الفيديو بالثواني
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -552,7 +553,7 @@ def receive_publish_story(update: Update, context: CallbackContext) -> int:
 # =============== فيديو بالذكاء الاصطناعي (Runway) ===============
 
 def video_command(update: Update, context: CallbackContext) -> int:
-    """بدء محادثة إنتاج فيديو."""
+    """بدء محادثة إنتاج فيديو: طلب فكرة الفيديو أولاً."""
     if update.effective_chat.type != "private":
         update.message.reply_text(
             "🎬 لإنتاج فيديو بالذكاء الاصطناعي، تواصل معي في الخاص.\n"
@@ -567,7 +568,7 @@ def video_command(update: Update, context: CallbackContext) -> int:
         "• مشهد غموض في مدينة الرياض ليلاً مع ضباب.\n"
         "• طفل يمشي في مكتبة قديمة، كاميرا من خلفه.\n"
         "• لقطة سينمائية لجزيرة مهجورة وقت الغروب.\n\n"
-        "سأحاول فهم فكرتك، وإذا كانت غير واضحة سأطلب منك تفاصيل إضافية.",
+        "بعد ذلك سأطلب منك تحديد مدة الفيديو بالثواني.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return STATE_VIDEO_IDEA
@@ -579,7 +580,7 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
 
     user_content = f"فكرة الفيديو من المستخدم @{username}:\n{idea}"
     if extra_info:
-        user_content += f"\n\nإجابات إضافية من المستخدم:\n{extra_info}"
+        user_content += f"\n\nمعلومات إضافية:\n{extra_info}"
 
     try:
         completion = client.chat.completions.create(
@@ -628,18 +629,67 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
         return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
 
 def handle_video_idea(update: Update, context: CallbackContext) -> int:
-    """يتعامل مع فكرة الفيديو الأولى."""
+    """يستقبل فكرة الفيديو ثم يطلب من المستخدم اختيار المدة."""
     idea = (update.message.text or "").strip()
     if not idea:
         update.message.reply_text("❗ لم أستطع قراءة فكرة الفيديو، أعد كتابتها من فضلك.")
         return STATE_VIDEO_IDEA
 
+    # نخزن الفكرة في user_data
+    context.user_data["video_idea"] = idea
+
+    # نسأل عن مدة الفيديو
+    duration_keyboard = ReplyKeyboardMarkup(
+        [["5", "10", "15", "20"]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+    update.message.reply_text(
+        "⏱ كم مدة الفيديو التي تريدها (بالثواني)؟\n"
+        "يمكنك اختيار من الأزرار أو كتابة رقم بين 5 و 20.",
+        reply_markup=duration_keyboard,
+    )
+
+    return STATE_VIDEO_DURATION
+
+def handle_video_duration(update: Update, context: CallbackContext) -> int:
+    """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت."""
+    text = (update.message.text or "").strip()
+
+    try:
+        seconds = int(text)
+    except ValueError:
+        update.message.reply_text(
+            "من فضلك أرسل رقم صحيح للمدة بالثواني، مثلاً 10 أو 15."
+        )
+        return STATE_VIDEO_DURATION
+
+    if seconds < 5 or seconds > 20:
+        update.message.reply_text(
+            "يفضل أن تكون مدة الفيديو بين 5 و 20 ثانية.\n"
+            "أرسل رقم داخل هذا النطاق."
+        )
+        return STATE_VIDEO_DURATION
+
+    idea = context.user_data.get("video_idea", "")
+    if not idea:
+        update.message.reply_text(
+            "❌ فقدت فكرة الفيديو، لنعد من البداية. اكتب /video مرة أخرى.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    # نخزن المدة في user_data لاستخدامها لاحقاً
+    context.user_data["video_duration_seconds"] = seconds
+
     user = update.effective_user
     username = user.username or user.first_name or "مستخدم"
 
-    update.message.reply_text("🔍 جاري تحليل فكرتك والتأكد من وضوحها...")
+    update.message.reply_text("🔍 جاري تحليل فكرتك وتجهيز برومبت الفيديو...")
 
-    result = refine_video_prompt_with_openai(idea, username=username)
+    extra_info = f"المستخدم يريد مدة تقريبية للفيديو تبلغ {seconds} ثانية."
+    result = refine_video_prompt_with_openai(idea, extra_info=extra_info, username=username)
     status = result.get("status")
 
     if status == "need_more":
@@ -647,20 +697,20 @@ def handle_video_idea(update: Update, context: CallbackContext) -> int:
         if not questions:
             update.message.reply_text(
                 "أحتاج بعض التفاصيل الإضافية عن الفيديو (الشخصيات، المكان، أسلوب التصوير، المزاج...). اكتبها في رسالة واحدة.",
+                reply_markup=ReplyKeyboardRemove(),
             )
         else:
             msg = "حتى أصنع برومبت فيديو قوي، أحتاج منك توضح لي هذه النقاط:\n\n"
             for q in questions:
                 msg += f"- {q}\n"
             msg += "\n✍️ أرسل إجاباتك في رسالة واحدة."
-            update.message.reply_text(msg)
+            update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove())
 
-        context.user_data["video_idea"] = idea
         return STATE_VIDEO_CLARIFY
 
     if status == "ok":
         final_prompt = result.get("final_prompt", "")
-        duration_seconds = int(result.get("duration_seconds", 10))
+        duration_seconds = int(result.get("duration_seconds", seconds))
         aspect_ratio = result.get("aspect_ratio", "16:9")
 
         if not final_prompt:
@@ -711,6 +761,7 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
     """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح."""
     extra = (update.message.text or "").strip()
     idea = context.user_data.get("video_idea", "")
+    seconds = context.user_data.get("video_duration_seconds", 10)
 
     if not extra:
         update.message.reply_text("❗ لم أستطع قراءة إجاباتك، أعد إرسالها من فضلك.")
@@ -721,7 +772,8 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 
     update.message.reply_text("🔧 شكراً للتفاصيل! جاري تجهيز برومبت الفيديو النهائي...")
 
-    result = refine_video_prompt_with_openai(idea, extra_info=extra, username=username)
+    extra_info = extra + f"\n\nمدة الفيديو المرغوبة تقريباً: {seconds} ثانية."
+    result = refine_video_prompt_with_openai(idea, extra_info=extra_info, username=username)
     status = result.get("status")
 
     if status != "ok":
@@ -732,7 +784,7 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
     final_prompt = result.get("final_prompt", "")
-    duration_seconds = int(result.get("duration_seconds", 10))
+    duration_seconds = int(result.get("duration_seconds", seconds))
     aspect_ratio = result.get("aspect_ratio", "16:9")
 
     if not final_prompt:
@@ -937,6 +989,9 @@ def main() -> None:
         states={
             STATE_VIDEO_IDEA: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_idea)
+            ],
+            STATE_VIDEO_DURATION: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_duration)
             ],
             STATE_VIDEO_CLARIFY: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_clarify)
