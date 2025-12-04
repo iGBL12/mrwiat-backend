@@ -1,7 +1,11 @@
 python-telegram-bot==13.15
 fastapi==0.110.0
 uvicorn==0.30.0
+
+# OpenAI + HTTPX (compatible versions)
 openai==1.14.3
+httpx==0.27.2
+
 SQLAlchemy==2.0.29
 pydantic==2.7.0
 python-multipart==0.0.9
