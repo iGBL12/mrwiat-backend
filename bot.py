@@ -1,6 +1,8 @@
 # bot.py
 import os
 import logging
+import json
+from io import BytesIO
 from textwrap import wrap
 
 from telegram import (
@@ -18,6 +20,7 @@ from telegram.ext import (
 )
 
 from openai import OpenAI
+import PyPDF2
 
 # =============== الإعدادات العامة ===============
 
@@ -32,21 +35,23 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 # نستخدم gpt-4.1-mini افتراضياً، ويمكن تغييره من المتغيرات
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
+# القروب / القناة التي سيتم النشر فيها عند الموافقة على القصة
+COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")  # مثال: -1001234567890
+
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
 if not OPENAI_API_KEY:
-    logger.warning("OPENAI_API_KEY is not set. Story generation will fail.")
+    logger.warning("OPENAI_API_KEY is not set. Story generation / review will fail.")
     client = None
 else:
-    # ✅ استخدام عميل OpenAI الجديد بدون أي معاملات إضافية
     client = OpenAI(api_key=OPENAI_API_KEY)
 
 # =============== ثوابت الحالات في المحادثة ===============
 
 STATE_STORY_GENRE = 1      # اختيار نوع القصة
 STATE_STORY_BRIEF = 2      # وصف فكرة القصة
-STATE_PUBLISH_STORY = 3    # نص القصة التي يريد المستخدم نشرها
+STATE_PUBLISH_STORY = 3    # نص القصة أو PDF الذي يريد المستخدم نشره
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -68,7 +73,7 @@ GENRE_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# =============== SYSTEM PROMPT المتخصص لمرويات ===============
+# =============== SYSTEM PROMPT لكتابة القصص ===============
 
 SYSTEM_PROMPT = """
 أنت كاتب قصص عربي محترف تعمل لصالح منصة "مرويات".
@@ -107,6 +112,38 @@ SYSTEM_PROMPT = """
 هدفك النهائي هو كتابة قصة ممتعة بجودة عالية تجعل القارئ يشعر بأنه يشاهد فيلمًا قصيرًا مكتوبًا بإتقان.
 """
 
+# =============== SYSTEM PROMPT لمراجعة القصص (نص أو PDF) ===============
+
+REVIEW_PROMPT = """
+أنت محرر رئيسي في منصة "مرويات" للقصص العربية.
+
+سيتم إرسال نص قصة كاملة إليك (سواء مأخوذة من ملف PDF أو نص مباشرة من المستخدم).
+مهمتك:
+
+1. التأكد أن القصة:
+   - مكتوبة باللغة العربية الفصحى السهلة.
+   - خالية من المحتوى المخالف (سياسة، عنف مبالغ، عنصرية، محتوى جنسي، ألفاظ نابية...إلخ).
+   - تحتوي على بداية وعقدة وذروة ونهاية.
+   - لها بنية قصصية واضحة وشخصيات وأحداث مترابطة.
+   - طولها مناسب للنشر (يفضل 1000 كلمة فأكثر).
+
+2. أعد تقييم القصة وأخبرنا:
+   - هل تصلح للنشر في قسم "قصص المجتمع" في مرويات؟
+   - إن لم تكن صالحة، اذكر السبب الرئيسي باختصار.
+
+3. أعد النتيجة في صيغة JSON فقط بدون أي نص إضافي، بالشكل التالي حرفياً:
+
+{
+  "approved": true أو false,
+  "word_count": عدد الكلمات التقريبي كعدد صحيح,
+  "title": "عنوان مقترح قصير للقصة",
+  "reasons": "شرح مختصر لسبب القبول أو الرفض",
+  "suggestions": "نصائح لتحسين القصة إن لزم الأمر"
+}
+
+لا تُرجع أي شيء خارج JSON، ولا تستخدم تعليقات أو نصوص أخرى.
+"""
+
 # =============== /start ===============
 
 def start(update: Update, context: CallbackContext) -> None:
@@ -115,7 +152,7 @@ def start(update: Update, context: CallbackContext) -> None:
         "👋 أهلاً بك في بوت مرويات للقصص.\n\n"
         "المميزات المتاحة حالياً:\n"
         "1️⃣ ✍️ كتابة قصة جديدة بالذكاء الاصطناعي.\n"
-        "2️⃣ 📤 نشر قصة من كتابتك (حد أدنى 1000 كلمة).\n\n"
+        "2️⃣ 📤 نشر قصة من كتابتك (نص أو ملف PDF، حد أدنى ~1000 كلمة).\n\n"
         "اختر من الأزرار بالأسفل أو استخدم الأوامر:\n"
         "/write أو /publish.",
         reply_markup=MAIN_KEYBOARD,
@@ -144,8 +181,6 @@ def write_command(update: Update, context: CallbackContext) -> int:
 def handle_story_genre(update: Update, context: CallbackContext) -> int:
     """يستقبل نوع القصة من المستخدم ثم يطلب منه وصف الفكرة."""
     genre_text = (update.message.text or "").strip()
-
-    # نخزن نوع القصة كما هو
     context.user_data["story_genre"] = genre_text
 
     update.message.reply_text(
@@ -160,11 +195,10 @@ def handle_story_genre(update: Update, context: CallbackContext) -> int:
 
     return STATE_STORY_BRIEF
 
-# =============== دالة استدعاء OpenAI مع النوع + الفكرة ===============
+# =============== دالة استدعاء OpenAI لكتابة قصة ===============
 
 def generate_story_with_openai(brief: str, genre: str, username: str = "") -> str:
     """يستدعي OpenAI لكتابة قصة عربية بناءً على النوع + الوصف."""
-
     if client is None:
         return "❌ لا يوجد إعداد لمفتاح OpenAI حالياً (OPENAI_API_KEY)."
 
@@ -214,7 +248,6 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
         update.message.reply_text(story_text, reply_markup=MAIN_KEYBOARD)
         return ConversationHandler.END
 
-    # تقسيم القصة على عدة رسائل حتى لا نتجاوز حد تيليجرام
     MAX_LEN = 3500
     chunks = wrap(story_text, MAX_LEN, break_long_words=False, replace_whitespace=False)
 
@@ -232,7 +265,55 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-# =============== /publish — نشر قصة كتبها المستخدم ===============
+# =============== دالة مراجعة قصة (نص) عبر OpenAI ===============
+
+def review_story_with_openai(text: str, username: str = ""):
+    """
+    يرسل نص القصة إلى OpenAI لمراجعته.
+    يُرجع dict فيه:
+      approved (bool), word_count (int), title (str), reasons (str), suggestions (str)
+    """
+    if client is None:
+        return {
+            "approved": False,
+            "word_count": len(text.split()),
+            "title": "",
+            "reasons": "لا يوجد إعداد لمفتاح OpenAI.",
+            "suggestions": "",
+        }
+
+    try:
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": REVIEW_PROMPT},
+                {"role": "user", "content": f"هذه قصة من المستخدم @{username}:\n\n{text}"},
+            ],
+            temperature=0.3,
+        )
+        raw = completion.choices[0].message.content.strip()
+
+        # محاولة قراءة JSON
+        data = json.loads(raw)
+        # تأكيد الحقول الأساسية
+        data.setdefault("approved", False)
+        data.setdefault("word_count", len(text.split()))
+        data.setdefault("title", "")
+        data.setdefault("reasons", "")
+        data.setdefault("suggestions", "")
+        return data
+
+    except Exception as e:
+        logger.exception("OpenAI review error: %s", e)
+        return {
+            "approved": False,
+            "word_count": len(text.split()),
+            "title": "",
+            "reasons": "حدث خطأ أثناء مراجعة القصة بالذكاء الاصطناعي.",
+            "suggestions": "",
+        }
+
+# =============== /publish — نشر قصة كتبها المستخدم (نص أو PDF) ===============
 
 def publish_command(update: Update, context: CallbackContext) -> int:
     """يبدأ محادثة استقبال قصة من المستخدم."""
@@ -246,52 +327,165 @@ def publish_command(update: Update, context: CallbackContext) -> int:
 
     update.message.reply_text(
         "📤 جميل! سنقوم الآن باستقبال قصتك.\n\n"
-        "أرسل نص القصة كاملة في *رسالة واحدة*.\n"
-        "▪️ الحد الأدنى: 1000 كلمة.\n"
-        "▪️ يمكنك نسخ القصة من ملف وورد ولصقها هنا.\n\n"
-        "بعد الإرسال سأخبرك هل القصة جاهزة للنشر أم تحتاج تطوير.",
+        "يمكنك:\n"
+        "• إرسال نص القصة كاملة في *رسالة واحدة*.\n"
+        "• أو إرسال ملف *PDF* يحتوي على القصة.\n\n"
+        "الحد الأدنى التقريبي للنشر هو 1000 كلمة.\n"
+        "بعد الإرسال سأقوم بتحليل القصة وإخبارك هل تم قبولها للنشر في 'قصص المجتمع'.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
 
     return STATE_PUBLISH_STORY
 
+def handle_pdf_story(update: Update, context: CallbackContext) -> int:
+    """يستقبل ملف PDF من المستخدم، يستخرج النص، يراجعه، ثم ينشره إذا كان مناسباً."""
+    doc = update.message.document
+
+    if not doc or doc.mime_type != "application/pdf":
+        update.message.reply_text("❗ من فضلك أرسل ملف PDF صالح يحتوي على القصة.")
+        return STATE_PUBLISH_STORY
+
+    user = update.effective_user
+    username = user.username or user.first_name or "قارئ مرويات"
+
+    update.message.reply_text("📥 تم استلام ملف PDF، جاري استخلاص النص وتحليله...")
+
+    try:
+        file = doc.get_file()
+        bio = BytesIO()
+        file.download(out=bio)
+        bio.seek(0)
+
+        reader = PyPDF2.PdfReader(bio)
+        full_text = ""
+        for page in reader.pages:
+            page_text = page.extract_text() or ""
+            full_text += page_text + "\n"
+
+    except Exception as e:
+        logger.exception("PDF read error: %s", e)
+        update.message.reply_text("❌ حدث خطأ أثناء قراءة ملف الـPDF. تأكد أن الملف نصي وليس صوراً فقط.")
+        return ConversationHandler.END
+
+    cleaned_text = full_text.strip()
+    if not cleaned_text:
+        update.message.reply_text("❌ لم أتمكن من استخراج أي نص من ملف الـPDF. ربما يكون عبارة عن صور فقط.")
+        return ConversationHandler.END
+
+    # يمكن تقصير النص إذا كان ضخماً جداً لتقليل التكلفة
+    MAX_CHARS_FOR_REVIEW = 15000
+    if len(cleaned_text) > MAX_CHARS_FOR_REVIEW:
+        cleaned_text = cleaned_text[:MAX_CHARS_FOR_REVIEW]
+
+    review = review_story_with_openai(cleaned_text, username=username)
+    approved = bool(review.get("approved"))
+    word_count = int(review.get("word_count") or len(cleaned_text.split()))
+    title = review.get("title") or "قصة من المجتمع"
+    reasons = review.get("reasons") or ""
+    suggestions = review.get("suggestions") or ""
+
+    if not approved:
+        msg = (
+            f"🔎 تم تحليل قصتك من ملف الـPDF.\n"
+            f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n\n"
+            "🚫 النتيجة: *غير جاهزة للنشر حالياً*.\n"
+        )
+        if reasons:
+            msg += f"\nالسبب الرئيسي:\n{reasons}\n"
+        if suggestions:
+            msg += f"\nبعض الاقتراحات للتحسين:\n{suggestions}\n"
+        update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+        return ConversationHandler.END
+
+    # القصة مقبولة للنشر
+    msg = (
+        f"✅ تم تحليل قصتك من ملف الـPDF.\n"
+        f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n"
+        "📣 النتيجة: *صالحة للنشر في قسم قصص المجتمع*.\n\n"
+        "🚀 سيتم الآن نشر ملف الـPDF في مجتمع مرويات باسمك."
+    )
+    update.message.reply_text(msg, parse_mode="Markdown")
+
+    if COMMUNITY_CHAT_ID:
+        try:
+            caption = (
+                f"📖 *{title}*\n"
+                f"✍️ من القارئ: @{username}\n\n"
+                "قسم: قصص المجتمع — منصة مرويات."
+            )
+            context.bot.send_document(
+                chat_id=int(COMMUNITY_CHAT_ID),
+                document=doc.file_id,
+                caption=caption,
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            logger.exception("Error sending PDF to community: %s", e)
+            update.message.reply_text(
+                "⚠️ تم قبول القصة، لكن حدث خطأ أثناء نشرها في المجتمع. "
+                "سأخبر الإدارة لمراجعة الأمر.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return ConversationHandler.END
+    else:
+        update.message.reply_text(
+            "✅ القصة مقبولة، لكن لم يتم ضبط COMMUNITY_CHAT_ID في الإعدادات، "
+            "لذا لن أستطيع النشر تلقائياً.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "🎉 تم نشر قصتك في مجتمع مرويات بنجاح.\n"
+        "شكرًا لمشاركتك 🌟",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    return ConversationHandler.END
+
+
 def receive_publish_story(update: Update, context: CallbackContext) -> int:
-    """يستقبل نص القصة من المستخدم ويتحقق من عدد الكلمات."""
+    """يستقبل نص القصة من المستخدم ويتحقق منه ويُراجعه بالذكاء الاصطناعي."""
     text = (update.message.text or "").strip()
 
     if not text:
         update.message.reply_text("لم أستطع قراءة نص القصة، أعد الإرسال من فضلك.")
         return STATE_PUBLISH_STORY
 
-    words = [w for w in text.split() if w.strip()]
-    word_count = len(words)
+    user = update.effective_user
+    username = user.username or user.first_name or "قارئ مرويات"
 
-    if word_count < 1000:
-        update.message.reply_text(
-            f"🔎 عدد كلمات قصتك الآن هو *{word_count}* كلمة فقط.\n"
-            f"الحد الأدنى للنشر في مرويات هو *1000* كلمة.\n\n"
-            "حاول إضافة:\n"
-            "• وصف للمكان\n"
-            "• تفاصيل أكثر عن الشخصيات\n"
-            "• حوارات بين الشخصيات\n\n"
-            "ثم أعد إرسال القصة كاملة في رسالة واحدة.",
-            parse_mode="Markdown",
+    update.message.reply_text("🔎 جاري تحليل قصتك والتأكد من جاهزيتها للنشر...")
+
+    review = review_story_with_openai(text, username=username)
+    approved = bool(review.get("approved"))
+    word_count = int(review.get("word_count") or len(text.split()))
+    title = review.get("title") or "قصة من المجتمع"
+    reasons = review.get("reasons") or ""
+    suggestions = review.get("suggestions") or ""
+
+    if not approved:
+        msg = (
+            f"📊 عدد كلمات قصتك هو *{word_count}* كلمة تقريباً.\n\n"
+            "🚫 النتيجة: *غير جاهزة للنشر حالياً*.\n"
         )
-        return STATE_PUBLISH_STORY
+        if reasons:
+            msg += f"\nالسبب الرئيسي:\n{reasons}\n"
+        if suggestions:
+            msg += f"\nبعض الاقتراحات للتحسين:\n{suggestions}\n"
+        update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+        return ConversationHandler.END
 
     context.user_data["last_published_story"] = text
     context.user_data["last_published_words"] = word_count
 
-    update.message.reply_text(
-        "✅ تم استلام قصتك بنجاح!\n\n"
-        f"عدد الكلمات: *{word_count}* كلمة.\n\n"
-        "سيتم لاحقاً ربط البوت بنظام مرويات لمراجعة القصة "
-        "وتحويلها إلى PDF ونشرها في قسم 'قصص المجتمع' باسمك.\n"
-        "شكرًا لمشاركتك 🌟",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
+    msg = (
+        f"✅ تم قبول قصتك للنشر!\n"
+        f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n\n"
+        "حالياً النشر التلقائي للنصوص غير مفعّل (يمكن لاحقاً تحويلها تلقائياً إلى PDF ونشرها).\n"
+        "شكرًا لمشاركتك 🌟"
     )
+    update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
     return ConversationHandler.END
 
@@ -336,7 +530,7 @@ def main() -> None:
     )
     dp.add_handler(story_conv)
 
-    # محادثة نشر قصة من كتابة المستخدم
+    # محادثة نشر قصة من كتابة المستخدم (نص أو PDF)
     publish_conv = ConversationHandler(
         entry_points=[
             CommandHandler("publish", publish_command),
@@ -347,10 +541,13 @@ def main() -> None:
         ],
         states={
             STATE_PUBLISH_STORY: [
+                # استقبال ملفات PDF
+                MessageHandler(Filters.document.pdf, handle_pdf_story),
+                # استقبال نص عادي
                 MessageHandler(
                     Filters.text & ~Filters.command,
                     receive_publish_story,
-                )
+                ),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],

@@ -10,3 +10,4 @@ SQLAlchemy==2.0.29
 pydantic==2.7.0
 python-multipart==0.0.9
 requests==2.31.0
+PyPDF2==3.0.1
