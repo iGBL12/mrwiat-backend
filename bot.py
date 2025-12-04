@@ -600,13 +600,14 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
         return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
 
 def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "16:9"):
-    """يرسل طلب إنشاء فيديو إلى Runway (هيكل مبدئي، عدّل حسب مستندات Runway)."""
+    """يرسل طلب إنشاء فيديو إلى Runway."""
     if not RUNWAY_API_KEY:
         return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
 
     headers = {
         "Authorization": f"Bearer {RUNWAY_API_KEY}",
         "Content-Type": "application/json",
+        "X-Runway-Version": "2024-09-26"
     }
 
     payload = {
@@ -625,6 +626,7 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
             return {"ok": False, "error": f"Runway API error: {resp.status_code} {resp.text}"}
         data = resp.json()
         return {"ok": True, "data": data}
+
     except Exception as e:
         logger.exception("Runway API error: %s", e)
         return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
