@@ -4,3 +4,6 @@ sqlalchemy
 httpx
 python-dotenv
 python-telegram-bot==21.6
+openai==1.14.3
+pydantic==2.7.0
+python-multipart==0.0.9
