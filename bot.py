@@ -73,6 +73,7 @@ STATE_VIDEO_IDEA = 4        # الفكرة الأولية للفيديو
 STATE_VIDEO_CLARIFY = 5     # إجابات المستخدم على أسئلة التوضيح
 STATE_IMAGE_PROMPT = 6      # وصف الصورة
 STATE_VIDEO_DURATION = 7    # مدة الفيديو بالثواني
+STATE_VIDEO_STATUS_ID = 8   # استعلام عن فيديو سابق برقم الطلب
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -80,6 +81,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["✍️ كتابة قصة بالذكاء الاصطناعي"],
         ["📤 نشر قصة من كتابتك"],
         ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
+        ["📥 استعلام عن فيديو سابق"],
     ],
     resize_keyboard=True,
 )
@@ -226,10 +228,11 @@ def start(update: Update, context: CallbackContext) -> None:
         "المميزات المتاحة حالياً:\n"
         "1️⃣ ✍️ كتابة قصة جديدة بالذكاء الاصطناعي.\n"
         "2️⃣ 📤 نشر قصة من كتابتك (نص أو ملف PDF، حد أدنى ~1000 كلمة).\n"
-        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway).\n"
-        "4️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي (OpenAI Images).\n\n"
+        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway) — الأمر /video.\n"
+        "4️⃣ 📥 استعلام عن فيديو سابق برقم الطلب — الأمر /video_status.\n"
+        "5️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي (OpenAI Images).\n\n"
         "اختر من الأزرار بالأسفل أو استخدم الأوامر:\n"
-        "/write أو /publish أو /video أو /image.",
+        "/write أو /publish أو /video أو /video_status أو /image.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -1009,6 +1012,102 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
+# =============== خدمة استعلام عن فيديو سابق برقم الطلب ===============
+
+def video_status_command(update: Update, context: CallbackContext) -> int:
+    """يطلب من المستخدم إدخال رقم طلب Runway للاستعلام عنه."""
+    if update.effective_chat.type != "private":
+        update.message.reply_text(
+            "📥 للاستعلام عن حالة فيديو سابق، تواصل معي في الخاص.\n"
+            "افتح البوت واضغط /video_status هناك.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "📥 أرسل الآن *رقم الطلب* الذي حصلت عليه من Runway (على شكل UUID):\n"
+        "`103d6a74-a651-4a6d-ada5-df8c640117ec` كمثال.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STATE_VIDEO_STATUS_ID
+
+
+def handle_video_status(update: Update, context: CallbackContext) -> int:
+    """يستقبل رقم الطلب، يجلب حالة المهمة من Runway، ويحاول إرسال الفيديو إن وُجد."""
+    task_id = (update.message.text or "").strip()
+
+    if not task_id:
+        update.message.reply_text("❗ لم أستطع قراءة رقم الطلب، أرسله مرة أخرى.")
+        return STATE_VIDEO_STATUS_ID
+
+    update.message.reply_text(
+        f"🔎 جاري الاستعلام عن حالة الطلب:\n`{task_id}`",
+        parse_mode="Markdown",
+    )
+
+    result = get_runway_task_detail(task_id)
+    if not result.get("ok"):
+        update.message.reply_text(
+            f"⚠️ حدث خطأ أثناء جلب حالة الطلب من Runway:\n{result.get('error')}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    data = result.get("data", {})
+    status = str(data.get("status", "غير معروف")).upper()
+
+    base_msg = (
+        f"ℹ️ حالة مهمة الفيديو على Runway:\n\n"
+        f"🆔 رقم الطلب: `{task_id}`\n"
+        f"📌 الحالة الحالية: *{status}*"
+    )
+
+    # لو نجحت المهمة، نحاول جلب الفيديو
+    if status == "SUCCEEDED":
+        video_url = extract_runway_video_url(data)
+        if video_url:
+            try:
+                update.message.reply_text(
+                    base_msg + "\n\n🎉 تم العثور على الفيديو، جاري إرساله...",
+                    parse_mode="Markdown",
+                )
+                update.message.bot.send_video(
+                    chat_id=update.effective_chat.id,
+                    video=video_url,
+                    caption="🎬 الفيديو الناتج من Runway لهذا الطلب.",
+                )
+            except Exception as e:
+                logger.exception("Telegram send_video (status) error: %s", e)
+                update.message.reply_text(
+                    base_msg
+                    + "\n\n🎬 تم إنشاء الفيديو، لكن تعذر إرساله كملف على تيليجرام.\n"
+                    f"هذا رابط الفيديو:\n{video_url}",
+                    parse_mode="Markdown",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+        else:
+            pretty = json.dumps(data, ensure_ascii=False, indent=2)
+            update.message.reply_text(
+                base_msg
+                + "\n\n✅ المهمة ناجحة، لكن لم أستطع العثور على رابط الفيديو بشكل واضح.\n"
+                "هذا الكائن المرسل من Runway:\n"
+                f"```json\n{pretty}\n```",
+                parse_mode="Markdown",
+                reply_markup=MAIN_KEYBOARD,
+            )
+    else:
+        # المهمة ليست ناجحة بعد أو فشلت
+        update.message.reply_text(
+            base_msg
+            + "\n\nقد تكون المهمة ما زالت قيد التنفيذ أو فشلت. "
+              "يمكنك التحقق أيضاً من لوحة Runway مباشرة.",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+    return ConversationHandler.END
+
 # =============== صور بالذكاء الاصطناعي (OpenAI Images) ===============
 
 def image_command(update: Update, context: CallbackContext) -> int:
@@ -1112,7 +1211,7 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
 def cancel(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
         "تم إلغاء العملية. يمكنك البدء من جديد بالأزرار أو بالأوامر:\n"
-        "/write أو /publish أو /video أو /image.",
+        "/write أو /publish أو /video أو /video_status أو /image.",
         reply_markup=MAIN_KEYBOARD,
     )
     return ConversationHandler.END
@@ -1194,6 +1293,25 @@ def main() -> None:
         allow_reentry=True,
     )
     dp.add_handler(video_conv)
+
+    # استعلام عن فيديو سابق برقم الطلب
+    video_status_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("video_status", video_status_command),
+            MessageHandler(
+                Filters.regex("^📥 استعلام عن فيديو سابق$"),
+                video_status_command,
+            ),
+        ],
+        states={
+            STATE_VIDEO_STATUS_ID: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_status)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(video_status_conv)
 
     # إنشاء صورة بالذكاء الاصطناعي
     image_conv = ConversationHandler(
