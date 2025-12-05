@@ -65,6 +65,44 @@ if not OPENAI_API_KEY:
 else:
     client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ======== إعدادات Moyasar للدفع =========
+MOYASAR_API_KEY = os.environ.get("MOYASAR_API_KEY")  # secret key (sk_***)
+MOYASAR_API_URL = os.environ.get("MOYASAR_API_URL", "https://api.moyasar.com/v1/invoices")
+MOYASAR_SUCCESS_URL = os.environ.get(
+    "MOYASAR_SUCCESS_URL",
+    "https://example.com/moyasar/success"  # عدّل هذا إلى دومينك
+)
+MOYASAR_BACK_URL = os.environ.get(
+    "MOYASAR_BACK_URL",
+    "https://t.me/YourBotUserName"         # عدّل إلى @username حق البوت
+)
+
+# ======== نظام المحفظة (نقاط لكل مستخدم) =========
+# ملاحظة: هذا تخزين في الذاكرة فقط (يضيع لو السكربت إعادة تشغيل)
+# في الإنتاج يفضّل تخزينه في قاعدة بيانات (SQLite / Firestore / Postgres...)
+USER_WALLETS = {}  # {user_id: points_int}
+
+# أسعار النقاط حسب الخدمات
+IMAGE_COST_POINTS = 10        # من جدولك
+STORY_COST_POINTS = 20        # قصة قصيرة
+# فيديو حسب المدة (دالة لاحقاً)
+def get_video_cost_points(duration_seconds: int) -> int:
+    if duration_seconds <= 10:
+        return 40
+    elif duration_seconds <= 15:
+        return 55
+    elif duration_seconds <= 20:
+        return 70
+    else:
+        return 100  # للاحتياط لو زادت المدة مستقبلاً
+
+# باقات الشحن (ريال -> نقاط)
+TOPUP_PACKAGES = {
+    10: {"points": 100, "label": "باقة 10 ريال (100 نقطة)"},
+    50: {"points": 500, "label": "باقة 50 ريال (500 نقطة)"},
+    100: {"points": 1100, "label": "باقة 100 ريال (1100 نقطة)"},
+}
+
 # =============== ثوابت الحالات في المحادثة ===============
 
 STATE_STORY_GENRE = 1       # اختيار نوع القصة
@@ -83,10 +121,11 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["📤 نشر قصة من كتابتك"],
         ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
         ["📥 استعلام عن فيديو سابق"],
-        ["💰 الأسعار والنقاط"],
+        ["💰 الأسعار والنقاط", "💳 المحفظة / الشحن"],
     ],
     resize_keyboard=True,
 )
+
 
 # لوحة اختيار نوع القصة
 GENRE_KEYBOARD = ReplyKeyboardMarkup(
@@ -232,9 +271,10 @@ def start(update: Update, context: CallbackContext) -> None:
         "2️⃣ 📤 نشر قصة من كتابتك (نص أو ملف PDF، حد أدنى ~1000 كلمة).\n"
         "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway) — الأمر /video.\n"
         "4️⃣ 📥 استعلام عن فيديو سابق برقم الطلب — الأمر /video_status.\n"
-        "5️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي (OpenAI Images).\n\n"
-        "اختر من الأزرار بالأسفل أو استخدم الأوامر:\n"
-        "/write أو /publish أو /video أو /video_status أو /image.",
+        "5️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي (OpenAI Images).\n"
+        "6️⃣ 💰 عرض الأسعار والنقاط — الأمر /pricing.\n"
+        "7️⃣ 💳 عرض رصيد المحفظة والشحن — الأمر /wallet.\n\n"
+        "اختر من الأزرار بالأسفل أو استخدم الأوامر.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -256,7 +296,7 @@ def write_command(update: Update, context: CallbackContext) -> int:
         reply_markup=GENRE_KEYBOARD,
     )
     return STATE_STORY_GENRE
-
+#==================== نظام المدفوعات و الاسعار==============================
 def pricing_command(update: Update, context: CallbackContext) -> None:
     """عرض جدول الأسعار والنقاط."""
     pricing_text = get_pricing_text()
@@ -265,7 +305,179 @@ def pricing_command(update: Update, context: CallbackContext) -> None:
         parse_mode="Markdown",
         reply_markup=MAIN_KEYBOARD,
     )
+# =============== دوال المحفظة ===============
 
+def get_user_id(update: Update) -> int:
+    return update.effective_user.id
+
+
+def get_user_balance(user_id: int) -> int:
+    # يمكنك إعطاء نقاط مجانية لأول مرة مثلاً:
+    if user_id not in USER_WALLETS:
+        USER_WALLETS[user_id] = 0
+    return USER_WALLETS[user_id]
+
+
+def add_user_points(user_id: int, delta: int) -> int:
+    """إضافة/خصم نقاط من المحفظة، ترجع الرصيد الجديد."""
+    current = get_user_balance(user_id)
+    new_balance = max(0, current + delta)
+    USER_WALLETS[user_id] = new_balance
+    return new_balance
+
+
+def require_points(update: Update, needed_points: int) -> bool:
+    """
+    يتحقق هل لدى المستخدم رصيد كافٍ.
+    لو لا، يرسل له رسالة أن يشحن المحفظة ويرجع False.
+    """
+    user_id = get_user_id(update)
+    balance = get_user_balance(user_id)
+    if balance < needed_points:
+        short = needed_points - balance
+        update.message.reply_text(
+            f"❌ رصيدك الحالي: {balance} نقطة.\n"
+            f"هذه الخدمة تحتاج: {needed_points} نقطة.\n"
+            f"ينقصك: {short} نقطة.\n\n"
+            "💳 استخدم الأمر /wallet أو زر *💳 المحفظة / الشحن* لشحن محفظتك.",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return False
+    return True
+
+
+def require_and_deduct(update: Update, needed_points: int) -> bool:
+    """
+    يتحقق أن الرصيد كافٍ ثم يخصم النقاط.
+    لو نجح يرجع True، لو لم يكن الرصيد كافياً يرجع False.
+    """
+    if not require_points(update, needed_points):
+        return False
+    user_id = get_user_id(update)
+    new_balance = add_user_points(user_id, -needed_points)
+    update.message.reply_text(
+        f"✅ تم خصم {needed_points} نقطة من محفظتك.\n"
+        f"🔢 رصيدك الحالي: {new_balance} نقطة.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return True
+# =============== دوال Moyasar ===============
+
+def create_moyasar_invoice(amount_sar: int, description: str, user: "telegram.User"):
+    """
+    إنشاء فاتورة في Moyasar لمبلغ محدد (بالريال).
+    ترجع dict فيها: ok, url, data أو ok=False مع error.
+    """
+    if not MOYASAR_API_KEY:
+        return {"ok": False, "error": "MOYASAR_API_KEY غير مضبوط في المتغيرات البيئية."}
+
+    amount_halalas = amount_sar * 100  # Moyasar يستخدم الهلل
+
+    payload = {
+        "amount": amount_halalas,
+        "currency": "SAR",
+        "description": description,
+        "success_url": MOYASAR_SUCCESS_URL,
+        "back_url": MOYASAR_BACK_URL,
+        "metadata": {
+            "telegram_id": user.id,
+            "telegram_username": user.username,
+        },
+    }
+
+    try:
+        resp = requests.post(
+            MOYASAR_API_URL,
+            auth=(MOYASAR_API_KEY, ""),  # Basic Auth: secret key كباسم مستخدم
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            return {
+                "ok": False,
+                "error": f"Moyasar API error: {resp.status_code} {resp.text}",
+            }
+        data = resp.json()
+        # حسب توثيق Moyasar الفاتورة تحتوي حقل 'url'
+        pay_url = data.get("url")
+        if not pay_url:
+            return {
+                "ok": False,
+                "error": "لم أجد رابط الفاتورة (url) في استجابة Moyasar.",
+                "data": data,
+            }
+        return {"ok": True, "url": pay_url, "data": data}
+    except Exception as e:
+        logger.exception("Moyasar invoice error: %s", e)
+        return {"ok": False, "error": "فشل الاتصال بـ Moyasar."}
+# =============== أوامر المحفظة والشحن ===============
+
+def wallet_command(update: Update, context: CallbackContext) -> None:
+    user = update.effective_user
+    user_id = user.id
+    balance = get_user_balance(user_id)
+    approx_sar = balance / 10  # لأن 10 نقاط ≈ 1 ريال
+
+    msg = (
+        f"💳 *محفظتك في مرويات*\n\n"
+        f"🔢 رصيدك الحالي: *{balance}* نقطة.\n"
+        f"💰 ما يعادل تقريباً: *{approx_sar:.1f}* ريال.\n\n"
+        "لشحن المحفظة اختر إحدى الباقات:\n"
+        "• /charge10  ➜ باقة 10 ريال (100 نقطة)\n"
+        "• /charge50  ➜ باقة 50 ريال (500 نقطة)\n"
+        "• /charge100 ➜ باقة 100 ريال (1100 نقطة)\n\n"
+        "📝 بعد الدفع عبر صفحة Moyasar سيتم تأكيد العملية عبر Webhook في السيرفر "
+        "ثم تُضاف النقاط إلى محفظتك تلقائياً (يحتاج إعداد خادم ويب)."
+    )
+    update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+
+
+def _charge_package(update: Update, context: CallbackContext, amount_sar: int):
+    user = update.effective_user
+    pkg = TOPUP_PACKAGES.get(amount_sar)
+    if not pkg:
+        update.message.reply_text("❌ باقة غير معروفة.", reply_markup=MAIN_KEYBOARD)
+        return
+
+    description = f"شحن محفظة مرويات - {pkg['label']}"
+    inv = create_moyasar_invoice(amount_sar, description, user)
+
+    if not inv.get("ok"):
+        update.message.reply_text(
+            f"⚠️ تعذر إنشاء فاتورة Moyasar:\n{inv.get('error')}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    pay_url = inv["url"]
+    points = pkg["points"]
+
+    update.message.reply_text(
+        f"💳 طلب شحن: *{pkg['label']}*\n"
+        f"📌 المبلغ: *{amount_sar} ريال*.\n"
+        f"🪙 عند إتمام الدفع ستُضاف *{points} نقطة* إلى محفظتك.\n\n"
+        f"✅ اضغط على الرابط لإكمال الدفع عبر Moyasar:\n{pay_url}",
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
+    # ملاحظة مهمة:
+    # لا نضيف النقاط هنا مباشرة، بل عند استلام Webhook من Moyasar في خادم ويب
+    # باستخدام metadata.telegram_id للتعرّف على المستخدم.
+
+
+def charge10_command(update: Update, context: CallbackContext) -> None:
+    _charge_package(update, context, 10)
+
+
+def charge50_command(update: Update, context: CallbackContext) -> None:
+    _charge_package(update, context, 50)
+
+
+def charge100_command(update: Update, context: CallbackContext) -> None:
+    _charge_package(update, context, 100)
+
+#====================================== نهاية نظام الدفوعات =============================
 def handle_story_genre(update: Update, context: CallbackContext) -> int:
     """يستقبل نوع القصة من المستخدم ثم يطلب منه وصف الفكرة."""
     genre_text = (update.message.text or "").strip()
@@ -315,7 +527,7 @@ def generate_story_with_openai(brief: str, genre: str, username: str = "") -> st
 
 
 def receive_story_brief(update: Update, context: CallbackContext) -> int:
-    """يستقبل وصف القصة، يستدعي OpenAI، ويرسل القصة الناتجة للمستخدم."""
+    """يستقبل وصف القصة، يتحقق من رصيد النقاط، يستدعي OpenAI، ويرسل القصة الناتجة للمستخدم."""
     brief = (update.message.text or "").strip()
     genre = context.user_data.get("story_genre", "غير محدد")
 
@@ -325,6 +537,11 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
 
     user = update.effective_user
     username = user.username or user.first_name or "قارئ مرويات"
+
+    # 🔴 أولاً: التأكد من وجود نقاط كافية للقصة
+    if not require_and_deduct(update, STORY_COST_POINTS):
+        # إن لم يكن لديه نقاط كافية، ننهي المحادثة
+        return ConversationHandler.END
 
     update.message.reply_text(
         f"⏳ جميل! سأكتب الآن قصة من نوع: {genre}\n"
@@ -911,9 +1128,10 @@ def handle_video_idea(update: Update, context: CallbackContext) -> int:
 
 
 def handle_video_duration(update: Update, context: CallbackContext) -> int:
-    """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت ثم Runway."""
+    """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت ثم Runway مع خصم النقاط."""
     text = (update.message.text or "").strip()
 
+    # تحويل النص إلى رقم ثواني
     try:
         seconds = int(text)
     except ValueError:
@@ -922,6 +1140,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
         )
         return STATE_VIDEO_DURATION
 
+    # التحقق من النطاق
     if seconds < 5 or seconds > 20:
         update.message.reply_text(
             "يفضل أن تكون مدة الفيديو بين 5 و 20 ثانية.\n"
@@ -948,6 +1167,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
     result = refine_video_prompt_with_openai(idea, extra_info=extra_info, username=username)
     status = result.get("status")
 
+    # في حال احتاج تفاصيل إضافية
     if status == "need_more":
         questions = result.get("questions", [])
         if not questions:
@@ -964,6 +1184,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
         return STATE_VIDEO_CLARIFY
 
+    # في حال كل شيء جاهز
     if status == "ok":
         final_prompt = result.get("final_prompt", "")
         duration_seconds = int(result.get("duration_seconds", seconds))
@@ -975,6 +1196,12 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
                 "حدث خطأ في توليد برومبت الفيديو. حاول وصف فكرتك مرة أخرى بشكل أوضح.",
                 reply_markup=MAIN_KEYBOARD,
             )
+            return ConversationHandler.END
+
+        # 🔴 حساب تكلفة الفيديو بالنقاط والتحقق من المحفظة
+        needed_points = get_video_cost_points(duration_seconds)
+        if not require_and_deduct(update, needed_points):
+            # رصيده لا يكفي، تم إعلامه في require_and_deduct
             return ConversationHandler.END
 
         update.message.reply_text(
@@ -992,6 +1219,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
         return ConversationHandler.END
 
+    # حالة خطأ عامة من OpenAI
     update.message.reply_text(
         "❌ حدث خطأ أثناء تحليل فكرة الفيديو. حاول مرة أخرى لاحقاً.",
         reply_markup=MAIN_KEYBOARD,
@@ -1000,7 +1228,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
 
 def handle_video_clarify(update: Update, context: CallbackContext) -> int:
-    """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح ثم يرسل الطلب إلى Runway."""
+    """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح ثم يرسل الطلب إلى Runway مع خصم النقاط."""
     extra = (update.message.text or "").strip()
     idea = context.user_data.get("video_idea", "")
     seconds = context.user_data.get("video_duration_seconds", 10)
@@ -1034,6 +1262,12 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
             "حدث خطأ في توليد برومبت الفيديو. حاول وصف فكرتك مرة أخرى.",
             reply_markup=MAIN_KEYBOARD,
         )
+        return ConversationHandler.END
+
+    # 🔴 حساب تكلفة الفيديو بالنقاط والتحقق من المحفظة
+    needed_points = get_video_cost_points(duration_seconds)
+    if not require_and_deduct(update, needed_points):
+        # رصيده لا يكفي
         return ConversationHandler.END
 
     update.message.reply_text(
@@ -1193,11 +1427,15 @@ def generate_image_prompt_with_openai(description: str) -> str:
 
 
 def handle_image_prompt(update: Update, context: CallbackContext) -> int:
-    """يستقبل وصف الصورة وينتج صورة باستخدام OpenAI Images."""
+    """يستقبل وصف الصورة، يتحقق من رصيد النقاط، ثم ينتج صورة باستخدام OpenAI Images."""
     desc = (update.message.text or "").strip()
     if not desc:
         update.message.reply_text("❗ لم أستطع قراءة وصف الصورة، أعد كتابته من فضلك.")
         return STATE_IMAGE_PROMPT
+
+    # 🔴 التأكد من وجود نقاط كافية للصورة
+    if not require_and_deduct(update, IMAGE_COST_POINTS):
+        return ConversationHandler.END
 
     update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة...")
 
@@ -1263,6 +1501,17 @@ def main() -> None:
 
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("pricing", pricing_command))
+    dp.add_handler(CommandHandler("wallet", wallet_command))
+    dp.add_handler(CommandHandler("charge10", charge10_command))
+    dp.add_handler(CommandHandler("charge50", charge50_command))
+    dp.add_handler(CommandHandler("charge100", charge100_command))
+    dp.add_handler(
+        MessageHandler(
+            Filters.regex("^💳 المحفظة / الشحن$"),
+            wallet_command,
+        )
+    )
+
     dp.add_handler(
     MessageHandler(
         Filters.regex("^💰 الأسعار والنقاط$"),
