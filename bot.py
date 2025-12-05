@@ -23,6 +23,7 @@ from telegram.ext import (
 from openai import OpenAI
 import PyPDF2
 import requests
+from pricing_config import get_pricing_text
 
 # =============== الإعدادات العامة ===============
 
@@ -82,6 +83,7 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["📤 نشر قصة من كتابتك"],
         ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
         ["📥 استعلام عن فيديو سابق"],
+        ["💰 الأسعار والنقاط"],
     ],
     resize_keyboard=True,
 )
@@ -255,6 +257,14 @@ def write_command(update: Update, context: CallbackContext) -> int:
     )
     return STATE_STORY_GENRE
 
+def pricing_command(update: Update, context: CallbackContext) -> None:
+    """عرض جدول الأسعار والنقاط."""
+    pricing_text = get_pricing_text()
+    update.message.reply_text(
+        pricing_text,
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 def handle_story_genre(update: Update, context: CallbackContext) -> int:
     """يستقبل نوع القصة من المستخدم ثم يطلب منه وصف الفكرة."""
@@ -1252,6 +1262,14 @@ def main() -> None:
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("pricing", pricing_command))
+    dp.add_handler(
+    MessageHandler(
+        Filters.regex("^💰 الأسعار والنقاط$"),
+        pricing_command,
+    )
+)
+
 
     # كتابة قصة بالذكاء الاصطناعي
     story_conv = ConversationHandler(
