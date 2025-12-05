@@ -37,11 +37,13 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
 # مفاتيح Runway لإنتاج الفيديو
 RUNWAY_API_KEY = os.environ.get("RUNWAY_API_KEY")
+# نستخدم text_to_video حسب توثيق Runway
 RUNWAY_API_URL = os.environ.get(
     "RUNWAY_API_URL",
-    "https://api.dev.runwayml.com/v1/generations",  # حسب رسالة الخطأ من Runway
+    "https://api.dev.runwayml.com/v1/text_to_video",
 )
 RUNWAY_API_VERSION = os.environ.get("RUNWAY_API_VERSION", "2024-11-06")
+RUNWAY_MODEL = os.environ.get("RUNWAY_MODEL", "veo3.1")  # موديل افتراضي
 
 # القروب / القناة التي سيتم النشر فيها عند الموافقة على القصة
 COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")  # مثال: -1001234567890
@@ -603,10 +605,25 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
         return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
 
 
-def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "16:9"):
-    """يرسل طلب إنشاء فيديو إلى Runway (هيكل مبدئي، عدّل حسب مستندات Runway)."""
+def _map_duration_to_runway(seconds: int) -> int:
+    """
+    Runway text_to_video يدعم فقط القيم: 4 أو 6 أو 8 ثواني.
+    نحول اختيار المستخدم (5–20 ثانية) لأقرب قيمة مسموحة.
+    """
+    if seconds <= 5:
+        return 4
+    elif seconds <= 10:
+        return 6
+    else:
+        return 8
+
+
+def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "1280:720"):
+    """يرسل طلب إنشاء فيديو نصي إلى Runway (text_to_video)."""
     if not RUNWAY_API_KEY:
         return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
+
+    mapped_duration = _map_duration_to_runway(duration_seconds)
 
     headers = {
         "Authorization": f"Bearer {RUNWAY_API_KEY}",
@@ -615,13 +632,11 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
     }
 
     payload = {
-        "model": "gen2",  # عدّل حسب نموذج Runway الذي تستخدمه
-        "prompt": prompt,
-        "mode": "video",
-        "extra_params": {
-            "seconds": duration_seconds,
-            "aspect_ratio": aspect_ratio,
-        },
+        "model": RUNWAY_MODEL,
+        "promptText": prompt,
+        "ratio": aspect_ratio,   # مثل 1280:720 أو 1080:1920
+        "audio": False,
+        "duration": mapped_duration,
     }
 
     try:
@@ -716,7 +731,8 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
     if status == "ok":
         final_prompt = result.get("final_prompt", "")
         duration_seconds = int(result.get("duration_seconds", seconds))
-        aspect_ratio = result.get("aspect_ratio", "16:9")
+        # Runway يقبل قيم معينة للـ ratio، نختار 1280:720 كافتراضي
+        aspect_ratio = "1280:720"
 
         if not final_prompt:
             update.message.reply_text(
@@ -791,7 +807,7 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 
     final_prompt = result.get("final_prompt", "")
     duration_seconds = int(result.get("duration_seconds", seconds))
-    aspect_ratio = result.get("aspect_ratio", "16:9")
+    aspect_ratio = "1280:720"
 
     if not final_prompt:
         update.message.reply_text(
