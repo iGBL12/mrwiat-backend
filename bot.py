@@ -727,17 +727,44 @@ def wait_for_runway_task(task_id: str, max_wait: int = 60, poll_interval: int = 
 
 def extract_runway_video_url(task_data: dict):
     """
-    نحاول استخراج رابط فيديو (url أو uri يبدأ بـ http) من كائن المهمة
-    بدون الاعتماد على تركيب ثابت، بالبحث بشكل عام داخل الـ JSON.
+    نحاول استخراج رابط فيديو (url أو uri يبدأ بـ http) من كائن المهمة.
+    أولاً نتعامل مع الحقل output الذي يستخدمه Runway حالياً:
+        "output": ["https://....mp4?..."]
+    ثم نرجع للبحث العام داخل الـ JSON كاحتياط.
     """
-    if not isinstance(task_data, dict):
+    # قد يأتي الـ JSON كـ dict أو مباشرة كـ list
+    if isinstance(task_data, list):
+        # لو هي قائمة مباشرة، نحاول أخذ أول عنصر نصي فيها
+        for item in task_data:
+            if isinstance(item, str) and item.startswith("http"):
+                return item
+        # لو ما وجدنا، نخلي باقي الدالة تكمل
+        task_root = {"_root": task_data}
+    elif isinstance(task_data, dict):
+        task_root = task_data
+    else:
         return None
 
+    # 1) معالجة صريحة لحقل "output"
+    output_val = task_root.get("output")
+    if isinstance(output_val, str) and output_val.startswith("http"):
+        return output_val
+    if isinstance(output_val, list):
+        for item in output_val:
+            if isinstance(item, str) and item.startswith("http"):
+                return item
+            if isinstance(item, dict):
+                # أحياناً يكون داخل dict فيه url/uri
+                if "url" in item or "uri" in item:
+                    val = item.get("url") or item.get("uri")
+                    if isinstance(val, str) and val.startswith("http"):
+                        return val
+
+    # 2) بحث عام داخل كل JSON كاحتياط
     candidates = []
 
     def walk(obj):
         if isinstance(obj, dict):
-            # لو فيه url أو uri نحفظه
             if "uri" in obj or "url" in obj:
                 val = obj.get("uri") or obj.get("url")
                 candidates.append(val)
@@ -746,10 +773,12 @@ def extract_runway_video_url(task_data: dict):
         elif isinstance(obj, list):
             for v in obj:
                 walk(v)
+        elif isinstance(obj, str):
+            if obj.startswith("http"):
+                candidates.append(obj)
 
-    walk(task_data)
+    walk(task_root)
 
-    # نرجع أول رابط HTTP واضح
     for c in candidates:
         if isinstance(c, str) and c.startswith("http"):
             return c
