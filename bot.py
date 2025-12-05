@@ -2,6 +2,7 @@
 import os
 import logging
 import json
+import time
 from io import BytesIO
 from textwrap import wrap
 
@@ -44,6 +45,12 @@ RUNWAY_API_URL = os.environ.get(
 )
 RUNWAY_API_VERSION = os.environ.get("RUNWAY_API_VERSION", "2024-11-06")
 RUNWAY_MODEL = os.environ.get("RUNWAY_MODEL", "veo3.1")  # موديل افتراضي
+
+# Endpoint لجلب تفاصيل المهمة من Runway
+RUNWAY_TASKS_URL = os.environ.get(
+    "RUNWAY_TASKS_URL",
+    "https://api.dev.runwayml.com/v1/tasks",
+)
 
 # القروب / القناة التي سيتم النشر فيها عند الموافقة على القصة
 COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")  # مثال: -1001234567890
@@ -649,6 +656,193 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
         logger.exception("Runway API error: %s", e)
         return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
 
+# =============== دوال جديدة: جلب كائن المهمة من Runway والانتظار ===============
+
+def get_runway_task_detail(task_id: str):
+    """استدعاء GET /v1/tasks/{id} للحصول على حالة المهمة والكائن كامل."""
+    if not RUNWAY_API_KEY:
+        return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
+
+    headers = {
+        "Authorization": f"Bearer {RUNWAY_API_KEY}",
+        "X-Runway-Version": RUNWAY_API_VERSION,
+    }
+
+    url = f"{RUNWAY_TASKS_URL.rstrip('/')}/{task_id}"
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code >= 400:
+            return {
+                "ok": False,
+                "error": f"Runway task detail error: {resp.status_code} {resp.text}",
+                "status_code": resp.status_code,
+            }
+        return {"ok": True, "data": resp.json()}
+    except Exception as e:
+        logger.exception("Runway task detail error: %s", e)
+        return {"ok": False, "error": "فشل جلب حالة مهمة Runway."}
+
+
+def wait_for_runway_task(task_id: str, max_wait: int = 60, poll_interval: int = 6):
+    """
+    ينتظر حتى تنتهي المهمة على Runway أو ينتهي max_wait ثانية.
+    يرجع dict فيه:
+      ok: bool (True لو SUCCEEDED)
+      status: حالة المهمة من Runway
+      data: الكائن الكامل للمهمة (JSON)
+    """
+    start = time.time()
+    last_data = None
+    while time.time() - start < max_wait:
+        result = get_runway_task_detail(task_id)
+        if not result.get("ok"):
+            return result
+
+        data = result["data"]
+        last_data = data
+        status = str(data.get("status", "")).upper()
+
+        if status in ("SUCCEEDED", "FAILED", "ABORTED", "CANCELED", "CANCELLED"):
+            return {
+                "ok": status == "SUCCEEDED",
+                "status": status,
+                "data": data,
+            }
+
+        # ما زالت PENDING / RUNNING / THROTTLED
+        time.sleep(poll_interval)
+
+    # انتهى الوقت ولم تنته المهمة
+    return {
+        "ok": False,
+        "status": str(last_data.get("status")) if isinstance(last_data, dict) else "UNKNOWN",
+        "data": last_data,
+        "error": "TIMEOUT",
+    }
+
+
+def extract_runway_video_url(task_data: dict):
+    """
+    نحاول استخراج رابط فيديو (url أو uri يبدأ بـ http) من كائن المهمة
+    بدون الاعتماد على تركيب ثابت، بالبحث بشكل عام داخل الـ JSON.
+    """
+    if not isinstance(task_data, dict):
+        return None
+
+    candidates = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            # لو فيه url أو uri نحفظه
+            if "uri" in obj or "url" in obj:
+                val = obj.get("uri") or obj.get("url")
+                candidates.append(val)
+            for v in obj.values():
+                walk(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                walk(v)
+
+    walk(task_data)
+
+    # نرجع أول رابط HTTP واضح
+    for c in candidates:
+        if isinstance(c, str) and c.startswith("http"):
+            return c
+
+    return None
+
+
+def send_runway_request_and_reply(
+    update: Update,
+    context: CallbackContext,
+    final_prompt: str,
+    duration_seconds: int,
+    aspect_ratio: str,
+):
+    """
+    دالة مساعدة مشتركة:
+    - ترسل الطلب إلى Runway
+    - تعرض رقم المهمة
+    - تحاول الانتظار حتى انتهاء المهمة (حتى ٦٠ ثانية)
+    - لو نجحت ترسل الفيديو / الرابط للمستخدم
+    """
+    runway_resp = create_runway_video_generation(
+        prompt=final_prompt,
+        duration_seconds=duration_seconds,
+        aspect_ratio=aspect_ratio,
+    )
+
+    if not runway_resp.get("ok"):
+        update.message.reply_text(
+            f"⚠️ تم تجهيز البرومبت، لكن حدث خطأ عند الإرسال إلى Runway:\n{runway_resp.get('error')}",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return
+
+    data = runway_resp.get("data", {})
+    gen_id = data.get("id", "غير معروف")
+
+    update.message.reply_text(
+        "🚀 تم إرسال طلب الفيديو إلى Runway بنجاح.\n"
+        f"🆔 رقم الطلب: `{gen_id}`",
+        parse_mode="Markdown",
+    )
+
+    # نحاول انتظار نتيجة المهمة لفترة محدودة
+    update.message.reply_text("⏳ جاري متابعة حالة المهمة على Runway، انتظر قليلاً...")
+
+    wait_result = wait_for_runway_task(gen_id, max_wait=60, poll_interval=6)
+
+    if not wait_result.get("ok"):
+        status = wait_result.get("status")
+        if status:
+            msg = (
+                f"ℹ️ حالة المهمة الحالية على Runway: *{status}*.\n"
+                "قد يستمر المعالجة هناك، يمكنك متابعة التقدم من لوحة Runway باستخدام رقم الطلب."
+            )
+            update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+        else:
+            update.message.reply_text(
+                "⚠️ لم أستطع التأكد من انتهاء المهمة على Runway الآن. "
+                "استخدم رقم الطلب لمتابعتها في لوحة Runway.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+        return
+
+    # SUCCEEDED
+    task_data = wait_result.get("data") or {}
+    video_url = extract_runway_video_url(task_data)
+
+    if video_url:
+        # نحاول إرسال الفيديو مباشرة، ولو فشل نرسل الرابط فقط
+        try:
+            update.message.reply_text("🎉 تم إنشاء الفيديو على Runway! سأرسله لك الآن...")
+            context.bot.send_video(
+                chat_id=update.effective_chat.id,
+                video=video_url,
+                caption="🎬 الفيديو الناتج من Runway.",
+            )
+        except Exception as e:
+            logger.exception("Telegram send_video error: %s", e)
+            update.message.reply_text(
+                "🎬 تم إنشاء الفيديو، لكن تعذر إرساله كملف على تيليجرام.\n"
+                f"هذا رابط الفيديو:\n{video_url}",
+                reply_markup=MAIN_KEYBOARD,
+            )
+    else:
+        # لم نجد رابط واضح في الاستجابة، نرسل الكائن JSON للمستخدم ليساعد في الديبَغ
+        pretty = json.dumps(task_data, ensure_ascii=False, indent=2)
+        update.message.reply_text(
+            "✅ المهمة انتهت بنجاح في Runway، لكن لم أستطع العثور على رابط الفيديو بشكل واضح.\n"
+            "هذا الكائن المرسل من Runway (يمكنك مراجعته أو إرساله للمطور):\n"
+            f"```json\n{pretty}\n```",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+# =============== Handlers للفيديو ===============
 
 def handle_video_idea(update: Update, context: CallbackContext) -> int:
     """يستقبل فكرة الفيديو ثم يطلب من المستخدم اختيار المدة."""
@@ -675,7 +869,7 @@ def handle_video_idea(update: Update, context: CallbackContext) -> int:
 
 
 def handle_video_duration(update: Update, context: CallbackContext) -> int:
-    """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت."""
+    """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت ثم Runway."""
     text = (update.message.text or "").strip()
 
     try:
@@ -743,33 +937,17 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
         update.message.reply_text(
             "✅ تم توليد برومبت احترافي للفيديو.\n"
-            "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو...",
+            "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو ومتابعة حالته...",
         )
 
-        runway_resp = create_runway_video_generation(
-            prompt=final_prompt,
+        send_runway_request_and_reply(
+            update=update,
+            context=context,
+            final_prompt=final_prompt,
             duration_seconds=duration_seconds,
             aspect_ratio=aspect_ratio,
         )
 
-        if not runway_resp.get("ok"):
-            update.message.reply_text(
-                f"⚠️ تم تجهيز البرومبت، لكن حدث خطأ عند الإرسال إلى Runway:\n{runway_resp.get('error')}",
-                reply_markup=MAIN_KEYBOARD,
-            )
-            return ConversationHandler.END
-
-        data = runway_resp.get("data", {})
-        gen_id = data.get("id", "غير معروف")
-
-        update.message.reply_text(
-            "🚀 تم إرسال طلب الفيديو إلى Runway بنجاح.\n"
-            f"🆔 رقم الطلب: `{gen_id}`\n\n"
-            "يمكنك لاحقاً ربط النظام لاستقبال الفيديو النهائي تلقائياً.\n"
-            "حالياً، احتفظ برقم الطلب في حال احتجت تتبع الحالة.",
-            parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
-        )
         return ConversationHandler.END
 
     update.message.reply_text(
@@ -780,7 +958,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
 
 def handle_video_clarify(update: Update, context: CallbackContext) -> int:
-    """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح."""
+    """يستقبل تفاصيل إضافية عن الفيديو بعد أسئلة التوضيح ثم يرسل الطلب إلى Runway."""
     extra = (update.message.text or "").strip()
     idea = context.user_data.get("video_idea", "")
     seconds = context.user_data.get("video_duration_seconds", 10)
@@ -818,32 +996,17 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 
     update.message.reply_text(
         "✅ تم تجهيز برومبت احترافي للفيديو بعد الأخذ بتفاصيلك.\n"
-        "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو...",
+        "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو ومتابعة حالته...",
     )
 
-    runway_resp = create_runway_video_generation(
-        prompt=final_prompt,
+    send_runway_request_and_reply(
+        update=update,
+        context=context,
+        final_prompt=final_prompt,
         duration_seconds=duration_seconds,
         aspect_ratio=aspect_ratio,
     )
 
-    if not runway_resp.get("ok"):
-        update.message.reply_text(
-            f"⚠️ تم تجهيز البرومبت، لكن حدث خطأ عند الإرسال إلى Runway:\n{runway_resp.get('error')}",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return ConversationHandler.END
-
-    data = runway_resp.get("data", {})
-    gen_id = data.get("id", "غير معروف")
-
-    update.message.reply_text(
-        "🚀 تم إرسال طلب الفيديو إلى Runway بنجاح.\n"
-        f"🆔 رقم الطلب: `{gen_id}`\n\n"
-        "يمكنك لاحقاً ربط النظام لاستقبال الفيديو النهائي تلقائياً.",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
-    )
     return ConversationHandler.END
 
 # =============== صور بالذكاء الاصطناعي (OpenAI Images) ===============
