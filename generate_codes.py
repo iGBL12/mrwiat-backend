@@ -24,8 +24,12 @@ def generate_one_code(length: int = 10) -> str:
 # توليد عدد من الأكواد
 # -----------------------------
 def generate_codes(count: int, points_per_code: int):
+    """
+    ترجع قائمة من التوازي (code, points) فقط، بدون كائنات ORM
+    حتى نستطيع الطباعة بعد إغلاق الـ Session.
+    """
     db = SessionLocal()
-    created_codes = []
+    generated_values = []  # [(code, points), ...]
 
     try:
         for _ in range(count):
@@ -39,15 +43,16 @@ def generate_codes(count: int, points_per_code: int):
             new_code = RedeemCode(
                 code=code,
                 points=points_per_code,
+                is_redeemed=False,
             )
 
             db.add(new_code)
             db.commit()
-            db.refresh(new_code)
 
-            created_codes.append(new_code)
+            # نخزن القيم نفسها فقط
+            generated_values.append((code, points_per_code))
 
-        return created_codes
+        return generated_values
 
     finally:
         db.close()
@@ -67,9 +72,9 @@ if __name__ == "__main__":
 
     print("✅ Generated Codes:\n")
 
-    # 🔥 اطبع كل الأكواد بدون أي اختصار
-    for c in codes:
-        print(f"{c.code}    ->    {c.points} points")
+    # نطبع كل الأكواد بالكامل
+    for code, pts in codes:
+        print(f"{code}    ->    {pts} points")
 
     print(f"\n💾 تم توليد {len(codes)} كود وطباعة جميع الأكواد بالكامل.")
-    print("📌 انسخ الأكواد الآن من التيرمنال وضعها في متجر سلة أو Excel.")
+    print("📌 انسخ الأكواد الآن من التيرمنال وضعها في متجر سلة أو في ملف Excel.")
