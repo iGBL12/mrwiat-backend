@@ -12,6 +12,6 @@ env/
 *.db
 Git/
 Programming Tools/
-
+generated_codes_*.txt
 # Env file
 .env

@@ -5,6 +5,7 @@ import json
 import time
 from io import BytesIO
 from textwrap import wrap
+from datetime import datetime
 
 from telegram import (
     Update,
@@ -24,6 +25,12 @@ from openai import OpenAI
 import PyPDF2
 import requests
 from pricing_config import get_pricing_text
+
+# SQLAlchemy / DB
+from sqlalchemy import Column, Integer, String, Boolean, BigInteger, DateTime
+from sqlalchemy.orm import Session
+
+from database import Base, engine, SessionLocal
 
 # =============== الإعدادات العامة ===============
 
@@ -65,27 +72,47 @@ if not OPENAI_API_KEY:
 else:
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ======== إعدادات Moyasar للدفع =========
-MOYASAR_API_KEY = os.environ.get("MOYASAR_API_KEY")  # secret key (sk_***)
-MOYASAR_API_URL = os.environ.get("MOYASAR_API_URL", "https://api.moyasar.com/v1/invoices")
-MOYASAR_SUCCESS_URL = os.environ.get(
-    "MOYASAR_SUCCESS_URL",
-    "https://example.com/moyasar/success"  # عدّل هذا إلى دومينك
-)
-MOYASAR_BACK_URL = os.environ.get(
-    "MOYASAR_BACK_URL",
-    "https://t.me/YourBotUserName"         # عدّل إلى @username حق البوت
-)
+# ======== نماذج قاعدة البيانات (SQLAlchemy ORM) =========
 
-# ======== نظام المحفظة (نقاط لكل مستخدم) =========
-# ملاحظة: هذا تخزين في الذاكرة فقط (يضيع لو السكربت إعادة تشغيل)
-# في الإنتاج يفضّل تخزينه في قاعدة بيانات (SQLite / Firestore / Postgres...)
-USER_WALLETS = {}  # {user_id: points_int}
+class UserWallet(Base):
+    """
+    جدول المحفظة لكل مستخدم تيليجرام.
+    user_id = Telegram user id
+    points  = رصيد النقاط
+    """
+    __tablename__ = "user_wallets"
 
-# أسعار النقاط حسب الخدمات
+    user_id = Column(BigInteger, primary_key=True, index=True)
+    points = Column(Integer, nullable=False, default=0)
+
+
+class TopupCode(Base):
+    """
+    جدول أكواد الشحن التي تُباع عبر سلة.
+    code    = النص الذي يكتبه المستخدم في البوت
+    points  = عدد النقاط التي يضيفها هذا الكود
+    is_used = هل تم استخدامه سابقاً؟
+    used_by = Telegram user id الذي استخدمه
+    used_at = وقت الاستخدام
+    """
+    __tablename__ = "topup_codes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(64), unique=True, index=True, nullable=False)
+    points = Column(Integer, nullable=False)
+    is_used = Column(Boolean, nullable=False, default=False)
+    used_by = Column(BigInteger, nullable=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+
+
+# إنشاء الجداول لو لم تكن موجودة (بسيطة، مناسبة كبداية)
+Base.metadata.create_all(bind=engine)
+
+# ======== أسعار النقاط حسب الخدمات =========
+
 IMAGE_COST_POINTS = 10        # من جدولك
 STORY_COST_POINTS = 20        # قصة قصيرة
-# فيديو حسب المدة (دالة لاحقاً)
+
 def get_video_cost_points(duration_seconds: int) -> int:
     if duration_seconds <= 10:
         return 40
@@ -95,13 +122,6 @@ def get_video_cost_points(duration_seconds: int) -> int:
         return 70
     else:
         return 100  # للاحتياط لو زادت المدة مستقبلاً
-
-# باقات الشحن (ريال -> نقاط)
-TOPUP_PACKAGES = {
-    10: {"points": 100, "label": "باقة 10 ريال (100 نقطة)"},
-    50: {"points": 500, "label": "باقة 50 ريال (500 نقطة)"},
-    100: {"points": 1100, "label": "باقة 100 ريال (1100 نقطة)"},
-}
 
 # =============== ثوابت الحالات في المحادثة ===============
 
@@ -113,6 +133,7 @@ STATE_VIDEO_CLARIFY = 5     # إجابات المستخدم على أسئلة ا
 STATE_IMAGE_PROMPT = 6      # وصف الصورة
 STATE_VIDEO_DURATION = 7    # مدة الفيديو بالثواني
 STATE_VIDEO_STATUS_ID = 8   # استعلام عن فيديو سابق برقم الطلب
+STATE_REDEEM_CODE = 9       # إدخال كود شحن من سلة
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -122,10 +143,10 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
         ["📥 استعلام عن فيديو سابق"],
         ["💰 الأسعار والنقاط", "💳 المحفظة / الشحن"],
+        ["🎟 شحن برمز من سلة"],
     ],
     resize_keyboard=True,
 )
-
 
 # لوحة اختيار نوع القصة
 GENRE_KEYBOARD = ReplyKeyboardMarkup(
@@ -138,7 +159,7 @@ GENRE_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# =============== SYSTEM PROMPT لكتابة القصص ===============
+# =============== SYSTEM PROMPTS ===============
 
 SYSTEM_PROMPT = """
 أنت كاتب قصص عربي محترف تعمل لصالح منصة "مرويات".
@@ -177,8 +198,6 @@ SYSTEM_PROMPT = """
 هدفك النهائي هو كتابة قصة ممتعة بجودة عالية تجعل القارئ يشعر بأنه يشاهد فيلمًا قصيرًا مكتوبًا بإتقان.
 """
 
-# =============== SYSTEM PROMPT لمراجعة القصص (نص أو PDF) ===============
-
 REVIEW_PROMPT = """
 أنت محرر رئيسي في منصة "مرويات" للقصص العربية.
 
@@ -208,8 +227,6 @@ REVIEW_PROMPT = """
 
 لا تُرجع أي شيء خارج JSON، ولا تستخدم تعليقات أو نصوص أخرى.
 """
-
-# =============== SYSTEM PROMPT لمساعدة برومبت الفيديو (Runway) ===============
 
 VIDEO_PROMPT_SYSTEM = """
 أنت خبير في صناعة برومبت احترافي لمولد فيديو مثل Runway Gen-2.
@@ -247,8 +264,6 @@ VIDEO_PROMPT_SYSTEM = """
 لا تخرج عن هذا الشكل أبداً، ولا تضف أي نص خارجه.
 """
 
-# =============== SYSTEM PROMPT لتحويل وصف صورة إلى برومبت صور احترافي ===============
-
 IMAGE_PROMPT_SYSTEM = """
 أنت مهندس برومبت للصور (Image Prompt Engineer) تعمل مع نموذج صور متقدم.
 
@@ -260,6 +275,135 @@ IMAGE_PROMPT_SYSTEM = """
 أعد النتيجة كنص واحد فقط: البرومبت باللغة الإنجليزية بدون أي شرح إضافي.
 """
 
+# =============== دوال المحفظة باستخدام قاعدة البيانات ===============
+
+def get_user_id(update: Update) -> int:
+    return update.effective_user.id
+
+
+def get_user_balance(user_id: int) -> int:
+    """
+    جلب رصيد المستخدم من جدول user_wallets.
+    إن لم يكن له صف، يتم إنشاؤه برصيد 0.
+    """
+    db: Session = SessionLocal()
+    try:
+        wallet = db.get(UserWallet, user_id)
+        if wallet is None:
+            wallet = UserWallet(user_id=user_id, points=0)
+            db.add(wallet)
+            db.commit()
+            db.refresh(wallet)
+        return wallet.points
+    except Exception as e:
+        logger.exception("get_user_balance error: %s", e)
+        return 0
+    finally:
+        db.close()
+
+
+def add_user_points(user_id: int, delta: int) -> int:
+    """
+    إضافة/خصم نقاط من المحفظة في قاعدة البيانات.
+    ترجع الرصيد الجديد.
+    """
+    db: Session = SessionLocal()
+    try:
+        wallet = db.get(UserWallet, user_id)
+        if wallet is None:
+            wallet = UserWallet(user_id=user_id, points=0)
+            db.add(wallet)
+        wallet.points = max(0, (wallet.points or 0) + delta)
+        db.add(wallet)
+        db.commit()
+        db.refresh(wallet)
+        return wallet.points
+    except Exception as e:
+        logger.exception("add_user_points error: %s", e)
+        db.rollback()
+        return 0
+    finally:
+        db.close()
+
+
+def require_points(update: Update, needed_points: int) -> bool:
+    """
+    يتحقق هل لدى المستخدم رصيد كافٍ.
+    لو لا، يرسل له رسالة أن يشحن المحفظة ويرجع False.
+    """
+    user_id = get_user_id(update)
+    balance = get_user_balance(user_id)
+    if balance < needed_points:
+        short = needed_points - balance
+        update.message.reply_text(
+            f"❌ رصيدك الحالي: {balance} نقطة.\n"
+            f"هذه الخدمة تحتاج: {needed_points} نقطة.\n"
+            f"ينقصك: {short} نقطة.\n\n"
+            "💳 اشترِ كود شحن من متجر *مرويات* في سلة ثم استخدم الأمر /redeem "
+            "أو زر 🎟 شحن برمز من سلة لإضافة الرصيد.",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return False
+    return True
+
+
+def require_and_deduct(update: Update, needed_points: int) -> bool:
+    """
+    يتحقق أن الرصيد كافٍ ثم يخصم النقاط من المحفظة (في DB).
+    لو نجح يرجع True، لو لم يكن الرصيد كافياً يرجع False.
+    """
+    if not require_points(update, needed_points):
+        return False
+    user_id = get_user_id(update)
+    new_balance = add_user_points(user_id, -needed_points)
+    update.message.reply_text(
+        f"✅ تم خصم {needed_points} نقطة من محفظتك.\n"
+        f"🔢 رصيدك الحالي: {new_balance} نقطة.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return True
+
+
+# =============== دوال أكواد الشحن من سلة ===============
+
+def redeem_code_in_db(code: str, telegram_id: int):
+    """
+    يحاول تفعيل كود شحن من جدول topup_codes.
+    - يرجع dict:
+      {"ok": True,  "points": 100} لو نجح
+      {"ok": False, "reason": "not_found" } لو الكود غير موجود
+      {"ok": False, "reason": "used"      } لو الكود مستخدم سابقاً
+      {"ok": False, "reason": "error", "error": "..."} لو حصل خطأ آخر
+    """
+    db: Session = SessionLocal()
+    try:
+        q = db.query(TopupCode).with_for_update()
+        code_row = q.filter(TopupCode.code == code).first()
+
+        if not code_row:
+            return {"ok": False, "reason": "not_found"}
+
+        if code_row.is_used:
+            return {"ok": False, "reason": "used"}
+
+        code_row.is_used = True
+        code_row.used_by = telegram_id
+        code_row.used_at = datetime.utcnow()
+        points = code_row.points
+
+        db.add(code_row)
+        db.commit()
+
+        return {"ok": True, "points": points}
+    except Exception as e:
+        logger.exception("redeem_code_in_db error: %s", e)
+        db.rollback()
+        return {"ok": False, "reason": "error", "error": str(e)}
+    finally:
+        db.close()
+
+
 # =============== /start ===============
 
 def start(update: Update, context: CallbackContext) -> None:
@@ -267,18 +411,122 @@ def start(update: Update, context: CallbackContext) -> None:
     update.message.reply_text(
         "👋 أهلاً بك في بوت مرويات للقصص.\n\n"
         "المميزات المتاحة حالياً:\n"
-        "1️⃣ ✍️ كتابة قصة جديدة بالذكاء الاصطناعي.\n"
-        "2️⃣ 📤 نشر قصة من كتابتك (نص أو ملف PDF، حد أدنى ~1000 كلمة).\n"
-        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway) — الأمر /video.\n"
-        "4️⃣ 📥 استعلام عن فيديو سابق برقم الطلب — الأمر /video_status.\n"
-        "5️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي (OpenAI Images).\n"
-        "6️⃣ 💰 عرض الأسعار والنقاط — الأمر /pricing.\n"
-        "7️⃣ 💳 عرض رصيد المحفظة والشحن — الأمر /wallet.\n\n"
+        "1️⃣ ✍️ كتابة قصة جديدة بالذكاء الاصطناعي — /write\n"
+        "2️⃣ 📤 نشر قصة من كتابتك (نص أو PDF، حد أدنى ~1000 كلمة) — /publish\n"
+        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway) — /video\n"
+        "4️⃣ 📥 استعلام عن فيديو سابق برقم الطلب — /video_status\n"
+        "5️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي — /image\n"
+        "6️⃣ 💰 عرض الأسعار والنقاط — /pricing\n"
+        "7️⃣ 💳 عرض رصيد المحفظة — /wallet\n"
+        "8️⃣ 🎟 شحن المحفظة برمز من سلة — /redeem\n\n"
         "اختر من الأزرار بالأسفل أو استخدم الأوامر.",
         reply_markup=MAIN_KEYBOARD,
     )
 
-# =============== /write — خطوة 1: اختيار نوع القصة ===============
+#==================== نظام الأسعار==============================
+
+def pricing_command(update: Update, context: CallbackContext) -> None:
+    """عرض جدول الأسعار والنقاط."""
+    pricing_text = get_pricing_text()
+    update.message.reply_text(
+        pricing_text,
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+# =============== أوامر المحفظة والشحن ===============
+
+def wallet_command(update: Update, context: CallbackContext) -> None:
+    user = update.effective_user
+    user_id = user.id
+    balance = get_user_balance(user_id)
+
+    msg = (
+        f"💳 *محفظتك في مرويات*\n\n"
+        f"🔢 رصيدك الحالي: *{balance}* نقطة.\n\n"
+        "لشحن المحفظة:\n"
+        "1️⃣ اشترِ *كود شحن* من متجر مرويات في سلة (حسب الباقة: 50 / 100 / 150 / 200 نقطة).\n"
+        "2️⃣ سيصلك رمز الشحن في رسالة من سلة.\n"
+        "3️⃣ ادخل هنا واستخدم الأمر /redeem أو زر 🎟 شحن برمز من سلة.\n"
+        "4️⃣ أرسل الكود، ولو كان صحيحًا وغير مستخدم ستُضاف النقاط إلى محفظتك.\n"
+    )
+    update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+
+
+def redeem_command(update: Update, context: CallbackContext) -> int:
+    """
+    بدء عملية شحن المحفظة برمز من سلة.
+    """
+    if update.effective_chat.type != "private":
+        update.message.reply_text(
+            "🎟 لشحن محفظتك برمز من سلة، تواصل معي في الخاص.\n"
+            "افتح البوت واضغط /redeem هناك.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "🎟 جميل! أرسل الآن *رمز الشحن* الذي اشتريته من متجر سلة.\n\n"
+        "مثال (الشكل فقط، ليس كودًا حقيقياً):\n"
+        "`MRW-100-XYZ111`\n\n"
+        "تأكد من نسخه كما هو تمامًا.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STATE_REDEEM_CODE
+
+
+def handle_redeem_code(update: Update, context: CallbackContext) -> int:
+    """
+    يستقبل كود الشحن، يتحقق منه في قاعدة البيانات، ويضيف النقاط إن كان صحيحًا ولم يُستخدم من قبل.
+    """
+    raw_code = (update.message.text or "").strip()
+    if not raw_code:
+        update.message.reply_text(
+            "❗ لم أستطع قراءة الكود، أعد إرساله من فضلك."
+        )
+        return STATE_REDEEM_CODE
+
+    code = raw_code.strip().upper()
+    user_id = get_user_id(update)
+
+    result = redeem_code_in_db(code, user_id)
+
+    if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "not_found":
+            update.message.reply_text(
+                "❌ هذا الرمز غير صحيح أو غير مسجّل في النظام.\n"
+                "تأكد أنك نسخته بالضبط من رسالة سلة."
+            )
+            return STATE_REDEEM_CODE
+        elif reason == "used":
+            update.message.reply_text(
+                "⚠️ هذا الرمز تم استخدامه من قبل، ولا يمكن استعماله مرة أخرى."
+            )
+            return ConversationHandler.END
+        else:
+            update.message.reply_text(
+                "⚠️ حدث خطأ أثناء محاولة تفعيل الكود. جرّب لاحقاً أو تواصل مع الدعم."
+            )
+            return ConversationHandler.END
+
+    # نجح ✅
+    points = result["points"]
+    new_balance = add_user_points(user_id, points)
+
+    update.message.reply_text(
+        f"✅ تم شحن محفظتك بنجاح!\n"
+        f"🪙 تم إضافة *{points}* نقطة إلى رصيدك.\n"
+        f"🔢 رصيدك الجديد: *{new_balance}* نقطة.\n\n"
+        "استمتع باستخدام خدمات مرويات 🌟",
+        parse_mode="Markdown",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+    return ConversationHandler.END
+
+#====================================== القصص / النشر / الفيديو / الصور =============================
 
 def write_command(update: Update, context: CallbackContext) -> int:
     """يبدأ محادثة إنشاء قصة جديدة: أولاً يسأل عن نوع القصة."""
@@ -296,188 +544,8 @@ def write_command(update: Update, context: CallbackContext) -> int:
         reply_markup=GENRE_KEYBOARD,
     )
     return STATE_STORY_GENRE
-#==================== نظام المدفوعات و الاسعار==============================
-def pricing_command(update: Update, context: CallbackContext) -> None:
-    """عرض جدول الأسعار والنقاط."""
-    pricing_text = get_pricing_text()
-    update.message.reply_text(
-        pricing_text,
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
-    )
-# =============== دوال المحفظة ===============
-
-def get_user_id(update: Update) -> int:
-    return update.effective_user.id
 
 
-def get_user_balance(user_id: int) -> int:
-    # يمكنك إعطاء نقاط مجانية لأول مرة مثلاً:
-    if user_id not in USER_WALLETS:
-        USER_WALLETS[user_id] = 0
-    return USER_WALLETS[user_id]
-
-
-def add_user_points(user_id: int, delta: int) -> int:
-    """إضافة/خصم نقاط من المحفظة، ترجع الرصيد الجديد."""
-    current = get_user_balance(user_id)
-    new_balance = max(0, current + delta)
-    USER_WALLETS[user_id] = new_balance
-    return new_balance
-
-
-def require_points(update: Update, needed_points: int) -> bool:
-    """
-    يتحقق هل لدى المستخدم رصيد كافٍ.
-    لو لا، يرسل له رسالة أن يشحن المحفظة ويرجع False.
-    """
-    user_id = get_user_id(update)
-    balance = get_user_balance(user_id)
-    if balance < needed_points:
-        short = needed_points - balance
-        update.message.reply_text(
-            f"❌ رصيدك الحالي: {balance} نقطة.\n"
-            f"هذه الخدمة تحتاج: {needed_points} نقطة.\n"
-            f"ينقصك: {short} نقطة.\n\n"
-            "💳 استخدم الأمر /wallet أو زر *💳 المحفظة / الشحن* لشحن محفظتك.",
-            parse_mode="Markdown",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return False
-    return True
-
-
-def require_and_deduct(update: Update, needed_points: int) -> bool:
-    """
-    يتحقق أن الرصيد كافٍ ثم يخصم النقاط.
-    لو نجح يرجع True، لو لم يكن الرصيد كافياً يرجع False.
-    """
-    if not require_points(update, needed_points):
-        return False
-    user_id = get_user_id(update)
-    new_balance = add_user_points(user_id, -needed_points)
-    update.message.reply_text(
-        f"✅ تم خصم {needed_points} نقطة من محفظتك.\n"
-        f"🔢 رصيدك الحالي: {new_balance} نقطة.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    return True
-# =============== دوال Moyasar ===============
-
-def create_moyasar_invoice(amount_sar: int, description: str, user: "telegram.User"):
-    """
-    إنشاء فاتورة في Moyasar لمبلغ محدد (بالريال).
-    ترجع dict فيها: ok, url, data أو ok=False مع error.
-    """
-    if not MOYASAR_API_KEY:
-        return {"ok": False, "error": "MOYASAR_API_KEY غير مضبوط في المتغيرات البيئية."}
-
-    amount_halalas = amount_sar * 100  # Moyasar يستخدم الهلل
-
-    payload = {
-        "amount": amount_halalas,
-        "currency": "SAR",
-        "description": description,
-        "success_url": MOYASAR_SUCCESS_URL,
-        "back_url": MOYASAR_BACK_URL,
-        "metadata": {
-            "telegram_id": user.id,
-            "telegram_username": user.username,
-        },
-    }
-
-    try:
-        resp = requests.post(
-            MOYASAR_API_URL,
-            auth=(MOYASAR_API_KEY, ""),  # Basic Auth: secret key كباسم مستخدم
-            json=payload,
-            timeout=30,
-        )
-        if resp.status_code >= 400:
-            return {
-                "ok": False,
-                "error": f"Moyasar API error: {resp.status_code} {resp.text}",
-            }
-        data = resp.json()
-        # حسب توثيق Moyasar الفاتورة تحتوي حقل 'url'
-        pay_url = data.get("url")
-        if not pay_url:
-            return {
-                "ok": False,
-                "error": "لم أجد رابط الفاتورة (url) في استجابة Moyasar.",
-                "data": data,
-            }
-        return {"ok": True, "url": pay_url, "data": data}
-    except Exception as e:
-        logger.exception("Moyasar invoice error: %s", e)
-        return {"ok": False, "error": "فشل الاتصال بـ Moyasar."}
-# =============== أوامر المحفظة والشحن ===============
-
-def wallet_command(update: Update, context: CallbackContext) -> None:
-    user = update.effective_user
-    user_id = user.id
-    balance = get_user_balance(user_id)
-    approx_sar = balance / 10  # لأن 10 نقاط ≈ 1 ريال
-
-    msg = (
-        f"💳 *محفظتك في مرويات*\n\n"
-        f"🔢 رصيدك الحالي: *{balance}* نقطة.\n"
-        f"💰 ما يعادل تقريباً: *{approx_sar:.1f}* ريال.\n\n"
-        "لشحن المحفظة اختر إحدى الباقات:\n"
-        "• /charge10  ➜ باقة 10 ريال (100 نقطة)\n"
-        "• /charge50  ➜ باقة 50 ريال (500 نقطة)\n"
-        "• /charge100 ➜ باقة 100 ريال (1100 نقطة)\n\n"
-        "📝 بعد الدفع عبر صفحة Moyasar سيتم تأكيد العملية عبر Webhook في السيرفر "
-        "ثم تُضاف النقاط إلى محفظتك تلقائياً (يحتاج إعداد خادم ويب)."
-    )
-    update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
-
-
-def _charge_package(update: Update, context: CallbackContext, amount_sar: int):
-    user = update.effective_user
-    pkg = TOPUP_PACKAGES.get(amount_sar)
-    if not pkg:
-        update.message.reply_text("❌ باقة غير معروفة.", reply_markup=MAIN_KEYBOARD)
-        return
-
-    description = f"شحن محفظة مرويات - {pkg['label']}"
-    inv = create_moyasar_invoice(amount_sar, description, user)
-
-    if not inv.get("ok"):
-        update.message.reply_text(
-            f"⚠️ تعذر إنشاء فاتورة Moyasar:\n{inv.get('error')}",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return
-
-    pay_url = inv["url"]
-    points = pkg["points"]
-
-    update.message.reply_text(
-        f"💳 طلب شحن: *{pkg['label']}*\n"
-        f"📌 المبلغ: *{amount_sar} ريال*.\n"
-        f"🪙 عند إتمام الدفع ستُضاف *{points} نقطة* إلى محفظتك.\n\n"
-        f"✅ اضغط على الرابط لإكمال الدفع عبر Moyasar:\n{pay_url}",
-        parse_mode="Markdown",
-        reply_markup=MAIN_KEYBOARD,
-    )
-    # ملاحظة مهمة:
-    # لا نضيف النقاط هنا مباشرة، بل عند استلام Webhook من Moyasar في خادم ويب
-    # باستخدام metadata.telegram_id للتعرّف على المستخدم.
-
-
-def charge10_command(update: Update, context: CallbackContext) -> None:
-    _charge_package(update, context, 10)
-
-
-def charge50_command(update: Update, context: CallbackContext) -> None:
-    _charge_package(update, context, 50)
-
-
-def charge100_command(update: Update, context: CallbackContext) -> None:
-    _charge_package(update, context, 100)
-
-#====================================== نهاية نظام الدفوعات =============================
 def handle_story_genre(update: Update, context: CallbackContext) -> int:
     """يستقبل نوع القصة من المستخدم ثم يطلب منه وصف الفكرة."""
     genre_text = (update.message.text or "").strip()
@@ -495,7 +563,6 @@ def handle_story_genre(update: Update, context: CallbackContext) -> int:
 
     return STATE_STORY_BRIEF
 
-# =============== دالة استدعاء OpenAI لكتابة قصة ===============
 
 def generate_story_with_openai(brief: str, genre: str, username: str = "") -> str:
     """يستدعي OpenAI لكتابة قصة عربية بناءً على النوع + الوصف."""
@@ -538,9 +605,8 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
     user = update.effective_user
     username = user.username or user.first_name or "قارئ مرويات"
 
-    # 🔴 أولاً: التأكد من وجود نقاط كافية للقصة
+    # التأكد من وجود نقاط كافية للقصة
     if not require_and_deduct(update, STORY_COST_POINTS):
-        # إن لم يكن لديه نقاط كافية، ننهي المحادثة
         return ConversationHandler.END
 
     update.message.reply_text(
@@ -571,7 +637,6 @@ def receive_story_brief(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-# =============== دالة مراجعة قصة (نص) عبر OpenAI ===============
 
 def review_story_with_openai(text: str, username: str = ""):
     """
@@ -617,7 +682,6 @@ def review_story_with_openai(text: str, username: str = ""):
             "suggestions": "",
         }
 
-# =============== /publish — نشر قصة كتبها المستخدم (نص أو PDF) ===============
 
 def publish_command(update: Update, context: CallbackContext) -> int:
     """يبدأ محادثة استقبال قصة من المستخدم."""
@@ -886,7 +950,6 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
         logger.exception("Runway API error: %s", e)
         return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
 
-# =============== دوال جديدة: جلب كائن المهمة من Runway والانتظار ===============
 
 def get_runway_task_detail(task_id: str):
     """استدعاء GET /v1/tasks/{id} للحصول على حالة المهمة والكائن كامل."""
@@ -955,24 +1018,17 @@ def wait_for_runway_task(task_id: str, max_wait: int = 60, poll_interval: int = 
 def extract_runway_video_url(task_data: dict):
     """
     نحاول استخراج رابط فيديو (url أو uri يبدأ بـ http) من كائن المهمة.
-    أولاً نتعامل مع الحقل output الذي يستخدمه Runway حالياً:
-        "output": ["https://....mp4?..."]
-    ثم نرجع للبحث العام داخل الـ JSON كاحتياط.
     """
-    # قد يأتي الـ JSON كـ dict أو مباشرة كـ list
     if isinstance(task_data, list):
-        # لو هي قائمة مباشرة، نحاول أخذ أول عنصر نصي فيها
         for item in task_data:
             if isinstance(item, str) and item.startswith("http"):
                 return item
-        # لو ما وجدنا، نخلي باقي الدالة تكمل
         task_root = {"_root": task_data}
     elif isinstance(task_data, dict):
         task_root = task_data
     else:
         return None
 
-    # 1) معالجة صريحة لحقل "output"
     output_val = task_root.get("output")
     if isinstance(output_val, str) and output_val.startswith("http"):
         return output_val
@@ -981,13 +1037,11 @@ def extract_runway_video_url(task_data: dict):
             if isinstance(item, str) and item.startswith("http"):
                 return item
             if isinstance(item, dict):
-                # أحياناً يكون داخل dict فيه url/uri
                 if "url" in item or "uri" in item:
                     val = item.get("url") or item.get("uri")
                     if isinstance(val, str) and val.startswith("http"):
                         return val
 
-    # 2) بحث عام داخل كل JSON كاحتياط
     candidates = []
 
     def walk(obj):
@@ -1021,7 +1075,6 @@ def send_runway_request_and_reply(
     aspect_ratio: str,
 ):
     """
-    دالة مساعدة مشتركة:
     - ترسل الطلب إلى Runway
     - تعرض رقم المهمة
     - تحاول الانتظار حتى انتهاء المهمة (حتى ٦٠ ثانية)
@@ -1049,7 +1102,6 @@ def send_runway_request_and_reply(
         parse_mode="Markdown",
     )
 
-    # نحاول انتظار نتيجة المهمة لفترة محدودة
     update.message.reply_text("⏳ جاري متابعة حالة المهمة على Runway، انتظر قليلاً...")
 
     wait_result = wait_for_runway_task(gen_id, max_wait=60, poll_interval=6)
@@ -1070,12 +1122,10 @@ def send_runway_request_and_reply(
             )
         return
 
-    # SUCCEEDED
     task_data = wait_result.get("data") or {}
     video_url = extract_runway_video_url(task_data)
 
     if video_url:
-        # نحاول إرسال الفيديو مباشرة، ولو فشل نرسل الرابط فقط
         try:
             update.message.reply_text("🎉 تم إنشاء الفيديو على Runway! سأرسله لك الآن...")
             context.bot.send_video(
@@ -1091,7 +1141,6 @@ def send_runway_request_and_reply(
                 reply_markup=MAIN_KEYBOARD,
             )
     else:
-        # لم نجد رابط واضح في الاستجابة، نرسل الكائن JSON للمستخدم ليساعد في الديبَغ
         pretty = json.dumps(task_data, ensure_ascii=False, indent=2)
         update.message.reply_text(
             "✅ المهمة انتهت بنجاح في Runway، لكن لم أستطع العثور على رابط الفيديو بشكل واضح.\n"
@@ -1101,7 +1150,6 @@ def send_runway_request_and_reply(
             reply_markup=MAIN_KEYBOARD,
         )
 
-# =============== Handlers للفيديو ===============
 
 def handle_video_idea(update: Update, context: CallbackContext) -> int:
     """يستقبل فكرة الفيديو ثم يطلب من المستخدم اختيار المدة."""
@@ -1131,7 +1179,6 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
     """يستقبل مدة الفيديو بالثواني ثم يستدعي OpenAI لتجهيز البرومبت ثم Runway مع خصم النقاط."""
     text = (update.message.text or "").strip()
 
-    # تحويل النص إلى رقم ثواني
     try:
         seconds = int(text)
     except ValueError:
@@ -1140,7 +1187,6 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
         )
         return STATE_VIDEO_DURATION
 
-    # التحقق من النطاق
     if seconds < 5 or seconds > 20:
         update.message.reply_text(
             "يفضل أن تكون مدة الفيديو بين 5 و 20 ثانية.\n"
@@ -1167,7 +1213,6 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
     result = refine_video_prompt_with_openai(idea, extra_info=extra_info, username=username)
     status = result.get("status")
 
-    # في حال احتاج تفاصيل إضافية
     if status == "need_more":
         questions = result.get("questions", [])
         if not questions:
@@ -1184,11 +1229,9 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
         return STATE_VIDEO_CLARIFY
 
-    # في حال كل شيء جاهز
     if status == "ok":
         final_prompt = result.get("final_prompt", "")
         duration_seconds = int(result.get("duration_seconds", seconds))
-        # Runway يقبل قيم معينة للـ ratio، نختار 1280:720 كافتراضي
         aspect_ratio = "1280:720"
 
         if not final_prompt:
@@ -1198,10 +1241,8 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
             )
             return ConversationHandler.END
 
-        # 🔴 حساب تكلفة الفيديو بالنقاط والتحقق من المحفظة
         needed_points = get_video_cost_points(duration_seconds)
         if not require_and_deduct(update, needed_points):
-            # رصيده لا يكفي، تم إعلامه في require_and_deduct
             return ConversationHandler.END
 
         update.message.reply_text(
@@ -1219,7 +1260,6 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
         return ConversationHandler.END
 
-    # حالة خطأ عامة من OpenAI
     update.message.reply_text(
         "❌ حدث خطأ أثناء تحليل فكرة الفيديو. حاول مرة أخرى لاحقاً.",
         reply_markup=MAIN_KEYBOARD,
@@ -1264,10 +1304,8 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
         )
         return ConversationHandler.END
 
-    # 🔴 حساب تكلفة الفيديو بالنقاط والتحقق من المحفظة
     needed_points = get_video_cost_points(duration_seconds)
     if not require_and_deduct(update, needed_points):
-        # رصيده لا يكفي
         return ConversationHandler.END
 
     update.message.reply_text(
@@ -1285,7 +1323,6 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-# =============== خدمة استعلام عن فيديو سابق برقم الطلب ===============
 
 def video_status_command(update: Update, context: CallbackContext) -> int:
     """يطلب من المستخدم إدخال رقم طلب Runway للاستعلام عنه."""
@@ -1336,7 +1373,6 @@ def handle_video_status(update: Update, context: CallbackContext) -> int:
         f"📌 الحالة الحالية: *{status}*"
     )
 
-    # لو نجحت المهمة، نحاول جلب الفيديو
     if status == "SUCCEEDED":
         video_url = extract_runway_video_url(data)
         if video_url:
@@ -1370,7 +1406,6 @@ def handle_video_status(update: Update, context: CallbackContext) -> int:
                 reply_markup=MAIN_KEYBOARD,
             )
     else:
-        # المهمة ليست ناجحة بعد أو فشلت
         update.message.reply_text(
             base_msg
             + "\n\nقد تكون المهمة ما زالت قيد التنفيذ أو فشلت. "
@@ -1433,7 +1468,6 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
         update.message.reply_text("❗ لم أستطع قراءة وصف الصورة، أعد كتابته من فضلك.")
         return STATE_IMAGE_PROMPT
 
-    # 🔴 التأكد من وجود نقاط كافية للصورة
     if not require_and_deduct(update, IMAGE_COST_POINTS):
         return ConversationHandler.END
 
@@ -1488,7 +1522,7 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
 def cancel(update: Update, context: CallbackContext) -> int:
     update.message.reply_text(
         "تم إلغاء العملية. يمكنك البدء من جديد بالأزرار أو بالأوامر:\n"
-        "/write أو /publish أو /video أو /video_status أو /image.",
+        "/write أو /publish أو /video أو /video_status أو /image أو /redeem.",
         reply_markup=MAIN_KEYBOARD,
     )
     return ConversationHandler.END
@@ -1502,23 +1536,26 @@ def main() -> None:
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("pricing", pricing_command))
     dp.add_handler(CommandHandler("wallet", wallet_command))
-    dp.add_handler(CommandHandler("charge10", charge10_command))
-    dp.add_handler(CommandHandler("charge50", charge50_command))
-    dp.add_handler(CommandHandler("charge100", charge100_command))
+    dp.add_handler(CommandHandler("redeem", redeem_command))
+
     dp.add_handler(
         MessageHandler(
             Filters.regex("^💳 المحفظة / الشحن$"),
             wallet_command,
         )
     )
-
     dp.add_handler(
-    MessageHandler(
-        Filters.regex("^💰 الأسعار والنقاط$"),
-        pricing_command,
+        MessageHandler(
+            Filters.regex("^💰 الأسعار والنقاط$"),
+            pricing_command,
+        )
     )
-)
-
+    dp.add_handler(
+        MessageHandler(
+            Filters.regex("^🎟 شحن برمز من سلة$"),
+            redeem_command,
+        )
+    )
 
     # كتابة قصة بالذكاء الاصطناعي
     story_conv = ConversationHandler(
@@ -1603,7 +1640,7 @@ def main() -> None:
             STATE_VIDEO_STATUS_ID: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_status)
             ],
-        },
+        ],
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
@@ -1628,8 +1665,28 @@ def main() -> None:
     )
     dp.add_handler(image_conv)
 
+    # شحن برمز من سلة (محادثة)
+    redeem_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("redeem", redeem_command),
+            MessageHandler(
+                Filters.regex("^🎟 شحن برمز من سلة$"),
+                redeem_command,
+            ),
+        ],
+        states={
+            STATE_REDEEM_CODE: [
+                MessageHandler(Filters.text & ~Filters.command, handle_redeem_code)
+            ],
+        ],
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(redeem_conv)
+
     updater.start_polling()
     updater.idle()
+
 
 if __name__ == "__main__":
     main()
