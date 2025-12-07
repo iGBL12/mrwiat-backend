@@ -1,51 +1,66 @@
 # generate_codes.py
-
 import random
 import string
+
 from database import SessionLocal
 from models import RedeemCode
 
-# عدد الأكواد لكل فئة
-GENERATE_COUNT = {
-    50: 10,
-    100: 10,
-    500: 5,
-}
+# ---------- إعدادات توليد الأكواد ----------
 
-def generate_random_code(length=10):
-    """Generate a random uppercase alphanumeric code."""
-    chars = string.ascii_uppercase + string.digits
-    return ''.join(random.choice(chars) for _ in range(length))
+# طول الكود، مثلاً: ABCD9F7K
+CODE_LENGTH = 10
+
+# عدد النقاط لكل كود (عدّلها كما تريد)
+POINTS_PER_CODE = 100
+
+# كم كود تريد توليده في كل تشغيل للسكريبت
+NUM_CODES = 20
+
+
+def generate_random_code(length: int = CODE_LENGTH) -> str:
+    """
+    توليد كود عشوائي بأحرف كبيرة + أرقام،
+    مع تجنّب الأحرف المربكة مثل O/0 و I/1.
+    """
+    alphabet = string.ascii_uppercase + string.digits
+    alphabet = alphabet.replace("O", "").replace("0", "")
+    alphabet = alphabet.replace("I", "").replace("1", "")
+
+    return "".join(random.choice(alphabet) for _ in range(length))
 
 
 def generate_codes():
     db = SessionLocal()
+    try:
+        created_codes = []
 
-    for points, qty in GENERATE_COUNT.items():
-        for _ in range(qty):
+        for _ in range(NUM_CODES):
+            # توليد كود فريد (إذا طلع مكرر نعيد التوليد)
+            while True:
+                code_str = generate_random_code()
+                exists = db.query(RedeemCode).filter_by(code=code_str).first()
+                if not exists:
+                    break
 
-            # توليد كود عشوائي
-            code = generate_random_code(12)
-
-            # التأكد أنه غير موجود مسبقاً
-            exists = db.query(RedeemCode).filter_by(code=code).first()
-            while exists:
-                code = generate_random_code(12)
-                exists = db.query(RedeemCode).filter_by(code=code).first()
-
-            # إنشاء الكود
             new_code = RedeemCode(
-                code=code,
-                points=points,
-                is_redeemed=False,
+                code=code_str,
+                points=POINTS_PER_CODE,
+                # created_at سيأخذ القيمة الافتراضية من الموديل/قاعدة البيانات
             )
-
             db.add(new_code)
-            print(f"Generated code → {code}  ({points} points)")
+            created_codes.append(new_code)
 
-    db.commit()
-    db.close()
-    print("\n✅ DONE — All codes added to PostgreSQL.")
+        db.commit()
+
+        print("✅ تم إنشاء الأكواد التالية:\n")
+        # نضمن أن IDs محدثة بعد commit
+        for c in created_codes:
+            print(f"{c.code}    ->   {c.points} نقطة")
+
+        print("\n💡 انسخ هذه الأكواد وخزنها في مكان آمن (مثلاً ملف نصي خاص).")
+
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
