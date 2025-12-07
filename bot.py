@@ -280,6 +280,10 @@ IMAGE_PROMPT_SYSTEM = """
 def get_user_id(update: Update) -> int:
     return update.effective_user.id
 
+def myid_command(update: Update, context: CallbackContext):
+    user = update.effective_user
+    update.message.reply_text(f"🆔 Your Telegram ID: {user.id}")
+
 
 def get_user_balance(user_id: int) -> int:
     """
@@ -1537,6 +1541,8 @@ def main() -> None:
     dp.add_handler(CommandHandler("pricing", pricing_command))
     dp.add_handler(CommandHandler("wallet", wallet_command))
     dp.add_handler(CommandHandler("redeem", redeem_command))
+    dp.add_handler(CommandHandler("myid", myid_command))
+
 
     dp.add_handler(
         MessageHandler(
