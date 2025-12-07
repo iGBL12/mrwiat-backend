@@ -1640,7 +1640,7 @@ def main() -> None:
             STATE_VIDEO_STATUS_ID: [
                 MessageHandler(Filters.text & ~Filters.command, handle_video_status)
             ],
-        ],
+        },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
@@ -1678,7 +1678,7 @@ def main() -> None:
             STATE_REDEEM_CODE: [
                 MessageHandler(Filters.text & ~Filters.command, handle_redeem_code)
             ],
-        ],
+        },
         fallbacks=[CommandHandler("cancel", cancel)],
         allow_reentry=True,
     )
