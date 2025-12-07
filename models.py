@@ -23,8 +23,6 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     wallet = relationship("Wallet", uselist=False, back_populates="user")
-    # لو حبيت تعرف كل الأكواد اللي استخدمها هذا اليوزر مستقبلاً:
-    # redeemed_codes = relationship("RedeemCode", back_populates="user")
 
 
 class Wallet(Base):
@@ -32,7 +30,6 @@ class Wallet(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True)
-    # تقدر تعتبرها رصيد نقاط مثلاً بدل سنتات
     balance_cents = Column(BigInteger, default=0, nullable=False)
     currency = Column(String(10), default="USD", nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -44,20 +41,18 @@ class RedeemCode(Base):
     __tablename__ = "redeem_codes"
 
     id = Column(Integer, primary_key=True, index=True)
-    # الكود نفسه اللي بتبيعه في سلة
-    code = Column(String(64), unique=True, index=True, nullable=False)
-    # عدد النقاط اللي يعطيها هذا الكود (مثلاً 50 أو 100 أو 150 أو 200)
-    points = Column(Integer, nullable=False)
+    # الكود نفسه
+    code = Column(String(32), unique=True, index=True, nullable=False)
+    # عدد النقاط التي يعطيها الكود
+    points = Column(Integer, nullable=False, default=0)
 
-    # هل تم استخدامه أم لا
-    is_used = Column(Boolean, default=False, nullable=False)
+    # هل تم استخدام الكود أم لا
+    is_redeemed = Column(Boolean, nullable=False, default=False)
 
-    # من هو المستخدم اللي استخدمه (اختياري حالياً)
-    used_by_telegram_id = Column(BigInteger, nullable=True)
-    used_at = Column(DateTime, nullable=True)
+    # من هو المستخدم الذي استخدم الكود (اختياري)
+    redeemed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+    redeemed_at = Column(DateTime, nullable=True)
 
-    # لو أردت ربطه بـ User كـ relationship (اختياري الآن):
-    # user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    # user = relationship("User", back_populates="redeemed_codes")
+    redeemed_by_user = relationship("User")
