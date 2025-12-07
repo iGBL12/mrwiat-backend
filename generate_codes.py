@@ -7,69 +7,69 @@ from database import SessionLocal
 from models import RedeemCode
 
 
+# -----------------------------
+# توليد كود واحد
+# -----------------------------
 def generate_one_code(length: int = 10) -> str:
-    """توليد كود عشوائي من حروف كبيرة + أرقام."""
     alphabet = string.ascii_uppercase + string.digits
-    return "".join(random.choices(alphabet, k=length))
+
+    # إزالة أحرف تسبب لبس
+    alphabet = alphabet.replace("O", "").replace("0", "")
+    alphabet = alphabet.replace("I", "").replace("1", "")
+
+    return "".join(random.choice(alphabet) for _ in range(length))
 
 
+# -----------------------------
+# توليد عدد من الأكواد
+# -----------------------------
 def generate_codes(count: int, points_per_code: int):
-    """
-    يولّد count كود، كل واحد بقيمة points_per_code نقطة،
-    ويحفظها في قاعدة البيانات.
-    """
     db = SessionLocal()
-    created = []
+    created_codes = []
 
     try:
         for _ in range(count):
-            # تأكد أن الكود غير مكرر في الجدول
+            # ضمان عدم التكرار
             while True:
-                code = generate_one_code(10)
+                code = generate_one_code()
                 exists = db.query(RedeemCode).filter_by(code=code).first()
                 if not exists:
                     break
 
-            obj = RedeemCode(
+            new_code = RedeemCode(
                 code=code,
-                points=points_per_code,   # 👈 هنا أهم شي: نستخدم عدد النقاط اللي مررته
+                points=points_per_code,
             )
-            db.add(obj)
-            created.append(obj)
 
-        db.commit()
-        return created
+            db.add(new_code)
+            db.commit()
+            db.refresh(new_code)
+
+            created_codes.append(new_code)
+
+        return created_codes
 
     finally:
         db.close()
 
 
+# -----------------------------
+# نقطة التشغيل الرئيسية
+# -----------------------------
 if __name__ == "__main__":
-    # قراءة عدد الأكواد من argv أو افتراضي 20
-    try:
-        count = int(sys.argv[1]) if len(sys.argv) >= 2 else 20
-    except ValueError:
-        print("❌ أول باراميتر لازم يكون عدد الأكواد (int). مثال: python generate_codes.py 500 100")
-        sys.exit(1)
+    # عدد الأكواد
+    count = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 
-    # قراءة عدد النقاط لكل كود من argv أو افتراضي 100
-    try:
-        points_per_code = int(sys.argv[2]) if len(sys.argv) >= 3 else 100
-    except ValueError:
-        print("❌ ثاني باراميتر لازم يكون عدد النقاط لكل كود (int). مثال: python generate_codes.py 500 100")
-        sys.exit(1)
+    # عدد النقاط لكل كود
+    points = int(sys.argv[2]) if len(sys.argv) > 2 else 100
 
-    codes = generate_codes(count, points_per_code)
+    codes = generate_codes(count, points)
 
     print("✅ Generated Codes:\n")
 
-    # نطبع فقط أول 50 كود عشان لا يصير التيرمنال مجنون
-    max_show = min(50, len(codes))
-    for c in codes[:max_show]:
-        print(f"{c.code:<12} -> {c.points:>4} points")
+    # 🔥 اطبع كل الأكواد بدون أي اختصار
+    for c in codes:
+        print(f"{c.code}    ->    {c.points} points")
 
-    if len(codes) > max_show:
-        remaining = len(codes) - max_show
-        print(f"\n… وتم إنشاء {remaining} كود إضافي (غير معروضة هنا).")
-
-    print("\n💾 جميع الأكواد تم حفظها في قاعدة البيانات.")
+    print(f"\n💾 تم توليد {len(codes)} كود وطباعة جميع الأكواد بالكامل.")
+    print("📌 انسخ الأكواد الآن من التيرمنال وضعها في متجر سلة أو Excel.")
