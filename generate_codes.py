@@ -1,33 +1,24 @@
-import sys
+import random
 import string
-import secrets
+import sys
 from datetime import datetime
-
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import RedeemCode
 
 
-CODE_LENGTH = 10  # طول الكود، غيره لو حاب
+def generate_random_code(length=10):
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
 
-def generate_random_code(length: int = CODE_LENGTH) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
-def generate_codes_for_points(db: Session, count: int, points: int) -> list[str]:
-    """
-    يولّد عدد معيّن من الأكواد لنقاط معيّنة، ويحفظها في قاعدة البيانات.
-    يرجّع قائمة الأكواد (strings) اللي انحفظت.
-    """
-    codes_list: list[str] = []
+def generate_codes(count, points):
+    db: Session = SessionLocal()
+    codes_list = []
 
     for _ in range(count):
-        # نضمن أن الكود ما يتكرر
         while True:
-            code = generate_random_code()
+            code = generate_random_code(10)
             exists = db.query(RedeemCode).filter_by(code=code).first()
             if not exists:
                 break
@@ -35,51 +26,42 @@ def generate_codes_for_points(db: Session, count: int, points: int) -> list[str]
         new_code = RedeemCode(
             code=code,
             points=points,
-            is_used=False,
             is_redeemed=False,
+            redeemed_by_user_id=None,
+            redeemed_at=None
         )
+
         db.add(new_code)
+        db.commit()
+
         codes_list.append(code)
 
-    db.commit()
+    db.close()
     return codes_list
 
 
-def write_codes_to_file(codes: list[str], points: int) -> str:
-    """
-    يكتب الأكواد في ملف نصّي مستقل لكل فئة نقاط.
-    مثال اسم الملف: redeem_codes_50_20251207_204600.txt
-    """
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    filename = f"redeem_codes_{points}_{timestamp}.txt"
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"Redeem codes for {points} points\n")
-        f.write("=" * 40 + "\n\n")
+def save_to_file(points, codes):
+    file_name = f"codes_{points}.txt"
+    with open(file_name, "w") as f:
         for c in codes:
-            f.write(c + "\n")
+            f.write(f"{c}\n")
+    print(f"📁 Saved {len(codes)} codes to {file_name}")
 
-    return filename
 
-
-def main():
-    if len(sys.argv) < 3:
-        print(
-            "Usage:\n"
-            "  python generate_codes.py <count_per_category> <points1> [<points2> ...]\n\n"
-            "مثال:\n"
-            "  python generate_codes.py 500 50 100 200\n"
-            "سيولّد 500 كود من 50 نقطة، و500 من 100 نقطة، و500 من 200 نقطة."
-        )
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        print("Usage: python generate_codes.py <count> <points>")
         sys.exit(1)
 
-    try:
-        count = int(sys.argv[1])
-    except ValueError:
-        print("❌ <count_per_category> يجب أن يكون رقمًا صحيحًا.")
-        sys.exit(1)
+    count = int(sys.argv[1])
+    points = int(sys.argv[2])
 
-    points_values = []
-    for raw in sys.argv[2:]:
-        try:
-            p = int(ra
+    codes = generate_codes(count, points)
+
+    print("\n⚡ Generated Codes:")
+    for c in codes:
+        print(f"{c}  ->  {points} points")
+
+    save_to_file(points, codes)
+
+    print("\n✨ Done! Codes saved and inserted into database.")
