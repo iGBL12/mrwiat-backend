@@ -1,80 +1,85 @@
-# generate_codes.py
 import sys
-import random
 import string
+import secrets
+from datetime import datetime
+
+from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import RedeemCode
 
 
-# -----------------------------
-# توليد كود واحد
-# -----------------------------
-def generate_one_code(length: int = 10) -> str:
+CODE_LENGTH = 10  # طول الكود، غيره لو حاب
+
+
+def generate_random_code(length: int = CODE_LENGTH) -> str:
     alphabet = string.ascii_uppercase + string.digits
-
-    # إزالة أحرف تسبب لبس
-    alphabet = alphabet.replace("O", "").replace("0", "")
-    alphabet = alphabet.replace("I", "").replace("1", "")
-
-    return "".join(random.choice(alphabet) for _ in range(length))
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
-# -----------------------------
-# توليد عدد من الأكواد
-# -----------------------------
-def generate_codes(count: int, points_per_code: int):
+def generate_codes_for_points(db: Session, count: int, points: int) -> list[str]:
     """
-    ترجع قائمة من التوازي (code, points) فقط، بدون كائنات ORM
-    حتى نستطيع الطباعة بعد إغلاق الـ Session.
+    يولّد عدد معيّن من الأكواد لنقاط معيّنة، ويحفظها في قاعدة البيانات.
+    يرجّع قائمة الأكواد (strings) اللي انحفظت.
     """
-    db = SessionLocal()
-    generated_values = []  # [(code, points), ...]
+    codes_list: list[str] = []
+
+    for _ in range(count):
+        # نضمن أن الكود ما يتكرر
+        while True:
+            code = generate_random_code()
+            exists = db.query(RedeemCode).filter_by(code=code).first()
+            if not exists:
+                break
+
+        new_code = RedeemCode(
+            code=code,
+            points=points,
+            is_used=False,
+            is_redeemed=False,
+        )
+        db.add(new_code)
+        codes_list.append(code)
+
+    db.commit()
+    return codes_list
+
+
+def write_codes_to_file(codes: list[str], points: int) -> str:
+    """
+    يكتب الأكواد في ملف نصّي مستقل لكل فئة نقاط.
+    مثال اسم الملف: redeem_codes_50_20251207_204600.txt
+    """
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    filename = f"redeem_codes_{points}_{timestamp}.txt"
+
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"Redeem codes for {points} points\n")
+        f.write("=" * 40 + "\n\n")
+        for c in codes:
+            f.write(c + "\n")
+
+    return filename
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(
+            "Usage:\n"
+            "  python generate_codes.py <count_per_category> <points1> [<points2> ...]\n\n"
+            "مثال:\n"
+            "  python generate_codes.py 500 50 100 200\n"
+            "سيولّد 500 كود من 50 نقطة، و500 من 100 نقطة، و500 من 200 نقطة."
+        )
+        sys.exit(1)
 
     try:
-        for _ in range(count):
-            # ضمان عدم التكرار
-            while True:
-                code = generate_one_code()
-                exists = db.query(RedeemCode).filter_by(code=code).first()
-                if not exists:
-                    break
+        count = int(sys.argv[1])
+    except ValueError:
+        print("❌ <count_per_category> يجب أن يكون رقمًا صحيحًا.")
+        sys.exit(1)
 
-            new_code = RedeemCode(
-                code=code,
-                points=points_per_code,
-                is_redeemed=False,
-            )
-
-            db.add(new_code)
-            db.commit()
-
-            # نخزن القيم نفسها فقط
-            generated_values.append((code, points_per_code))
-
-        return generated_values
-
-    finally:
-        db.close()
-
-
-# -----------------------------
-# نقطة التشغيل الرئيسية
-# -----------------------------
-if __name__ == "__main__":
-    # عدد الأكواد
-    count = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-
-    # عدد النقاط لكل كود
-    points = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-
-    codes = generate_codes(count, points)
-
-    print("✅ Generated Codes:\n")
-
-    # نطبع كل الأكواد بالكامل
-    for code, pts in codes:
-        print(f"{code}    ->    {pts} points")
-
-    print(f"\n💾 تم توليد {len(codes)} كود وطباعة جميع الأكواد بالكامل.")
-    print("📌 انسخ الأكواد الآن من التيرمنال وضعها في متجر سلة أو في ملف Excel.")
+    points_values = []
+    for raw in sys.argv[2:]:
+        try:
+            p = int(ra

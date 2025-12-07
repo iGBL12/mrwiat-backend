@@ -22,6 +22,7 @@ class User(Base):
     username = Column(String(255))
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # علاقة واحد لواحد مع المحفظة
     wallet = relationship("Wallet", uselist=False, back_populates="user")
 
 
@@ -41,18 +42,24 @@ class RedeemCode(Base):
     __tablename__ = "redeem_codes"
 
     id = Column(Integer, primary_key=True, index=True)
+
     # الكود نفسه
     code = Column(String(32), unique=True, index=True, nullable=False)
+
     # عدد النقاط التي يعطيها الكود
     points = Column(Integer, nullable=False, default=0)
 
-    # هل تم استخدام الكود أم لا
+    # هل تم استخدام الكود داخل النظام (لمنع استخدامه أكثر من مرة)
+    is_used = Column(Boolean, nullable=False, default=False)
+
+    # هل تم استرداد الكود كنقاط في المحفظة
     is_redeemed = Column(Boolean, nullable=False, default=False)
 
-    # من هو المستخدم الذي استخدم الكود (اختياري)
+    # رقم المستخدم الذي استخدم الكود (من جدول users)
     redeemed_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     redeemed_at = Column(DateTime, nullable=True)
 
+    # علاقة اختيارية مع المستخدم الذي استخدم الكود
     redeemed_by_user = relationship("User")
