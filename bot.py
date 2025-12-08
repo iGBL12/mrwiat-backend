@@ -73,18 +73,18 @@ Base.metadata.create_all(bind=engine)
 
 # ======== أسعار النقاط =========
 
-IMAGE_COST_POINTS = 10        # صورة
-STORY_COST_POINTS = 20        # قصة نصية
+IMAGE_COST_POINTS = 25        # صورة
+STORY_COST_POINTS = 5        # قصة نصية
 
 def get_video_cost_points(duration_seconds: int) -> int:
-    if duration_seconds <= 10:
-        return 40
+    if duration_seconds <= 5:
+        return 30
+    elif duration_seconds <= 10:
+        return 60
     elif duration_seconds <= 15:
-        return 55
-    elif duration_seconds <= 20:
-        return 70
+        return 85
     else:
-        return 100
+        return 110
 
 # =============== ثوابت الحالات في المحادثة ===============
 
