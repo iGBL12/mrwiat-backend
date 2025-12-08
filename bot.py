@@ -36,7 +36,7 @@ from database import SessionLocal
 from models import RedeemCode, User, Wallet
 from datetime import datetime
 from models import User, Wallet, RedeemCode
-
+import re
 # =============== الإعدادات العامة ===============
 
 logging.basicConfig(
@@ -310,6 +310,18 @@ def get_user_balance(user_id: int) -> int:
     finally:
         db.close()
 
+
+def redeem_start(update, context):
+    """رسالة إرشادية عند الضغط على زر شحن أو كتابة /redeem."""
+    update.message.reply_text(
+        "جميل! 👌\n"
+        "🧾 أرسل الآن *رمز الشحن* الذي اشتريته من متجر سلة.\n\n"
+        "مثال (الشكل فقط، ليس كود حقيقي):\n"
+        "`MRW-100-XYZ111`\n\n"
+        "تأكد من نسخه كما هو تمامًا بدون مسافات إضافية.",
+        parse_mode="Markdown",
+    )
+
 def redeem_code_logic(tg_user, raw_text: str):
     """
     tg_user: كائن Telegram User (update.effective_user)
@@ -394,9 +406,22 @@ def receive_redeem(update, context):
     user = update.effective_user
     text = (update.message.text or "").strip()
 
+    # ✅ تجاهل أي نص لا يشبه شكل الكود (عربي / جملة طويلة / إلخ)
+    # الكود عندك عبارة عن حروف وأرقام وربما شرطات، طول من 6 إلى 20 حرف
+    norm = text.upper()
+    if not re.fullmatch(r"[A-Z0-9\-]{6,20}", norm):
+        # مش كود، خليه يمر لبقية البوت أو تجاهله بدون رد
+        return
+
     success, message = redeem_code_logic(user, text)
     update.message.reply_text(message, parse_mode="Markdown")
 
+def myid_command(update, context):
+    user = update.effective_user
+    update.message.reply_text(
+        f"🔢 Telegram ID الخاص بك هو:\n`{user.id}`",
+        parse_mode="Markdown",
+    )
 
 def add_user_points(user_id: int, delta: int) -> int:
     """
@@ -1634,11 +1659,13 @@ def main() -> None:
     dp.add_handler(CommandHandler("wallet", wallet_command))
     dp.add_handler(CommandHandler("redeem", redeem_command))
     dp.add_handler(CommandHandler("myid", myid_command))
-        # هاندلر تفعيل الأكواد (آخر هاندلر)
+    dp.add_handler(CommandHandler("id", myid_command))
+        # بدء عملية الشحن برمز من سلة
+    dp.add_handler(CommandHandler("redeem", redeem_start))
     dp.add_handler(
         MessageHandler(
-            Filters.text & ~Filters.command,
-            receive_redeem,
+            Filters.regex("^شحن برمز من سلة$"),
+            redeem_start,
         )
     )
 
