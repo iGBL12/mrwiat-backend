@@ -813,23 +813,31 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
         )
         raw = completion.choices[0].message.content.strip()
 
-        # نحاول أولاً نقرأه كـ JSON
         try:
             data = json.loads(raw)
-            return data
-        except json.JSONDecodeError:
-            # لو ما التزم بالـ JSON نستخدم الرد كنص برومبت جاهز
-            logger.warning("Video prompt is not valid JSON, using raw text as final prompt.")
-            return {
-                "status": "ok",
-                "final_prompt": raw,
-                "duration_seconds": 10,   # قيمة افتراضية معقولة
-                "aspect_ratio": "16:9",
-            }
+        except Exception as e:
+            logger.error(f"JSON ERROR: {e}\nRAW RESPONSE:\n{raw}")
+            return {"status": "error", "error": "JSON parse failed"}
+
+        # 🔁 تطبيع (normalize) الشكل القديم إلى الشكل الذي يفهمه الكود
+        if "status" not in data:
+            clarity = data.get("clarity")
+            if clarity and clarity != "clear":
+                questions = data.get("missing_details") or []
+                if not questions and data.get("request_for_more_info"):
+                    questions = [data["request_for_more_info"]]
+                return {"status": "need_more", "questions": questions}
+            elif clarity == "clear" and "final_prompt" in data:
+                data["status"] = "ok"
+                return data
+            else:
+                return {"status": "error", "error": "Unexpected JSON schema"}
+
+        return data
 
     except Exception as e:
         logger.exception("OpenAI video prompt error: %s", e)
-        return {"status": "error", "error": str(e)}
+        return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
 
 
 def _map_duration_to_runway(seconds: int) -> int:
