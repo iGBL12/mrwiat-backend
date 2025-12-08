@@ -361,7 +361,6 @@ def receive_redeem(update, context):
     success, message = redeem_code_logic(user.id, text)
     update.message.reply_text(message)
 
-dp.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_redeem))
 
 def add_user_points(user_id: int, delta: int) -> int:
     """
@@ -1599,6 +1598,8 @@ def main() -> None:
     dp.add_handler(CommandHandler("wallet", wallet_command))
     dp.add_handler(CommandHandler("redeem", redeem_command))
     dp.add_handler(CommandHandler("myid", myid_command))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_redeem))
+    
 
 
     dp.add_handler(
