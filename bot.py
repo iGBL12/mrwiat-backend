@@ -35,6 +35,8 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import RedeemCode, User, Wallet
 from datetime import datetime
+from models import User, Wallet, RedeemCode
+
 # =============== الإعدادات العامة ===============
 
 logging.basicConfig(
@@ -308,35 +310,66 @@ def get_user_balance(user_id: int) -> int:
     finally:
         db.close()
 
-def redeem_code_logic(user_id: int, code_text: str):
-    db: Session = SessionLocal()
+def redeem_code_logic(tg_user, raw_text: str):
+    """
+    tg_user: كائن Telegram User (update.effective_user)
+    raw_text: النص الذي أرسله المستخدم (الكود كما هو)
+    يرجع (success: bool, message: str)
+    """
+    if not raw_text:
+        return False, "⚠️ لم أستطع قراءة الكود، أرسله مرة أخرى."
+
+    # 1) تنظيف الكود
+    code_text = raw_text.strip().upper()
+
+    # إزالة أي بادئة مثل MRW-100- أو MRW-50- ... إلخ
+    prefixes = ["MRW-100-", "MRW-50-", "MRW-500-", "MRW-1100-", "MRW-"]
+    for p in prefixes:
+        if code_text.startswith(p):
+            code_text = code_text[len(p):]
+            break
+
+    if not code_text:
+        return False, "⚠️ الكود فارغ بعد التنظيف، تأكد من نسخه بشكل صحيح."
+
+    db = SessionLocal()
     try:
-        code_text = code_text.strip().upper()
+        # 2) الحصول على المستخدم أو إنشاؤه إن لم يكن موجوداً
+        user = db.query(User).filter(User.telegram_id == tg_user.id).first()
+        if not user:
+            user = User(
+                telegram_id=tg_user.id,
+                first_name=tg_user.first_name,
+                username=tg_user.username,
+            )
+            db.add(user)
+            db.flush()
 
-        # إذا الكود فيه MRW-100-xxx قصّه وخذ الجزئية الأخيرة فقط
-        if "MRW" in code_text and "-" in code_text:
-            parts = code_text.split("-")
-            code_text = parts[-1].upper()
+            # إنشاء محفظة لهذا المستخدم إن لم توجد
+            wallet = Wallet(user_id=user.id, balance_cents=0)
+            db.add(wallet)
+            db.commit()
+            db.refresh(user)
+        else:
+            wallet = user.wallet
+            if wallet is None:
+                wallet = Wallet(user_id=user.id, balance_cents=0)
+                db.add(wallet)
+                db.commit()
+                db.refresh(user)
 
-        redeem = db.query(RedeemCode).filter_by(code=code_text).first()
+        # 3) البحث عن الكود في قاعدة البيانات
+        redeem = db.query(RedeemCode).filter(RedeemCode.code == code_text).first()
 
         if not redeem:
             return False, "❌ هذا الكود غير صحيح."
 
         if redeem.is_redeemed:
-            return False, "⚠️ هذا الكود تم استخدامه مسبقًا."
+            return False, "⛔ تم استخدام هذا الكود من قبل."
 
-        # الحصول على المستخدم
-        user = db.query(User).filter_by(telegram_id=user_id).first()
-        if not user:
-            return False, "🚫 لم يتم العثور على حسابك في النظام."
-
-        wallet = user.wallet
-        if not wallet:
-            return False, "🚫 لا توجد محفظة مرتبطة بحسابك."
-
-        # إضافة النقاط
-        wallet.balance_cents += redeem.points
+        # 4) شحن النقاط
+        points = redeem.points or 0
+        wallet.balance_cents += points  # نستخدم balance_cents كنقاط
 
         redeem.is_redeemed = True
         redeem.redeemed_by_user_id = user.id
@@ -344,22 +377,25 @@ def redeem_code_logic(user_id: int, code_text: str):
 
         db.commit()
 
-        return True, f"🎉 تم شحن {redeem.points} نقطة إلى محفظتك بنجاح!"
+        return True, (
+            f"🎉 تم شحن *{points}* نقطة إلى محفظتك بنجاح.\n"
+            f"🔢 رصيدك الحالي: {wallet.balance_cents} نقطة."
+        )
 
     except Exception as e:
-        print("ERROR:", e)
         db.rollback()
-        return False, "❌ حدث خطأ أثناء التفعيل."
-
+        # للتشخيص في اللوجز
+        logger.exception("Redeem code error: %s", e)
+        return False, "⚠️ حدث خطأ أثناء معالجة الكود، حاول مرة أخرى لاحقاً."
     finally:
         db.close()
 
 def receive_redeem(update, context):
     user = update.effective_user
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
 
-    success, message = redeem_code_logic(user.id, text)
-    update.message.reply_text(message)
+    success, message = redeem_code_logic(user, text)
+    update.message.reply_text(message, parse_mode="Markdown")
 
 
 def add_user_points(user_id: int, delta: int) -> int:
@@ -1598,7 +1634,14 @@ def main() -> None:
     dp.add_handler(CommandHandler("wallet", wallet_command))
     dp.add_handler(CommandHandler("redeem", redeem_command))
     dp.add_handler(CommandHandler("myid", myid_command))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_redeem))
+        # هاندلر تفعيل الأكواد (آخر هاندلر)
+    dp.add_handler(
+        MessageHandler(
+            Filters.text & ~Filters.command,
+            receive_redeem,
+        )
+    )
+
     
 
 
