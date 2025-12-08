@@ -31,7 +31,10 @@ from sqlalchemy import Column, Integer, String, Boolean, BigInteger, DateTime
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
-
+from sqlalchemy.orm import Session
+from database import SessionLocal
+from models import RedeemCode, User, Wallet
+from datetime import datetime
 # =============== الإعدادات العامة ===============
 
 logging.basicConfig(
@@ -305,6 +308,60 @@ def get_user_balance(user_id: int) -> int:
     finally:
         db.close()
 
+def redeem_code_logic(user_id: int, code_text: str):
+    db: Session = SessionLocal()
+    try:
+        code_text = code_text.strip().upper()
+
+        # إذا الكود فيه MRW-100-xxx قصّه وخذ الجزئية الأخيرة فقط
+        if "MRW" in code_text and "-" in code_text:
+            parts = code_text.split("-")
+            code_text = parts[-1].upper()
+
+        redeem = db.query(RedeemCode).filter_by(code=code_text).first()
+
+        if not redeem:
+            return False, "❌ هذا الكود غير صحيح."
+
+        if redeem.is_redeemed:
+            return False, "⚠️ هذا الكود تم استخدامه مسبقًا."
+
+        # الحصول على المستخدم
+        user = db.query(User).filter_by(telegram_id=user_id).first()
+        if not user:
+            return False, "🚫 لم يتم العثور على حسابك في النظام."
+
+        wallet = user.wallet
+        if not wallet:
+            return False, "🚫 لا توجد محفظة مرتبطة بحسابك."
+
+        # إضافة النقاط
+        wallet.balance_cents += redeem.points
+
+        redeem.is_redeemed = True
+        redeem.redeemed_by_user_id = user.id
+        redeem.redeemed_at = datetime.utcnow()
+
+        db.commit()
+
+        return True, f"🎉 تم شحن {redeem.points} نقطة إلى محفظتك بنجاح!"
+
+    except Exception as e:
+        print("ERROR:", e)
+        db.rollback()
+        return False, "❌ حدث خطأ أثناء التفعيل."
+
+    finally:
+        db.close()
+
+def receive_redeem(update, context):
+    user = update.effective_user
+    text = update.message.text.strip()
+
+    success, message = redeem_code_logic(user.id, text)
+    update.message.reply_text(message)
+
+dp.add_handler(MessageHandler(Filters.text & ~Filters.command, receive_redeem))
 
 def add_user_points(user_id: int, delta: int) -> int:
     """
