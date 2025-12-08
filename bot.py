@@ -796,7 +796,7 @@ def video_command(update: Update, context: CallbackContext) -> int:
 
 def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: str = ""):
     if client is None:
-        return {"status": "error", "error": "إعداد خدمة الذكاء الاصطناعي غير مكتمل."}
+        return {"status": "error", "error": "No OPENAI client configured."}
 
     user_content = f"فكرة الفيديو من المستخدم @{username}:\n{idea}"
     if extra_info:
@@ -812,11 +812,24 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
             temperature=0.5,
         )
         raw = completion.choices[0].message.content.strip()
-        data = json.loads(raw)
-        return data
+
+        # نحاول أولاً نقرأه كـ JSON
+        try:
+            data = json.loads(raw)
+            return data
+        except json.JSONDecodeError:
+            # لو ما التزم بالـ JSON نستخدم الرد كنص برومبت جاهز
+            logger.warning("Video prompt is not valid JSON, using raw text as final prompt.")
+            return {
+                "status": "ok",
+                "final_prompt": raw,
+                "duration_seconds": 10,   # قيمة افتراضية معقولة
+                "aspect_ratio": "16:9",
+            }
+
     except Exception as e:
-        logger.exception("AI video prompt error: %s", e)
-        return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
+        logger.exception("OpenAI video prompt error: %s", e)
+        return {"status": "error", "error": str(e)}
 
 
 def _map_duration_to_runway(seconds: int) -> int:
