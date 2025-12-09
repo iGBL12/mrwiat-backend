@@ -44,7 +44,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
-# مفاتيح Runway
+# مفاتيح خدمة الفيديو بالذكاء الاصطناعي (Runway في الخلفية)
 RUNWAY_API_KEY = os.environ.get("RUNWAY_API_KEY")
 RUNWAY_API_URL = os.environ.get(
     "RUNWAY_API_URL",
@@ -231,7 +231,6 @@ VIDEO_PROMPT_SYSTEM = """
 
 لا تخرج عن هذا الشكل أبداً، ولا تضف أي مفاتيح أو نصوص أخرى خارج هذا الـ JSON.
 """
-
 
 IMAGE_PROMPT_SYSTEM = """
 أنت مهندس برومبت للصور (Image Prompt Engineer) تعمل مع نموذج صور متقدم.
@@ -473,7 +472,7 @@ def start(update: Update, context: CallbackContext) -> None:
         "المميزات المتاحة حالياً:\n"
         "1️⃣ ✍️ كتابة قصة جديدة بالذكاء الاصطناعي — /write\n"
         "2️⃣ 📤 نشر قصة من كتابتك — /publish\n"
-        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي (Runway) — /video\n"
+        "3️⃣ 🎬 إنتاج فيديو بالذكاء الاصطناعي — /video\n"
         "4️⃣ 📥 استعلام عن فيديو سابق — /video_status\n"
         "5️⃣ 🖼 إنشاء صورة بالذكاء الاصطناعي — /image\n"
         "6️⃣ 💰 عرض الأسعار والنقاط — /pricing\n"
@@ -521,7 +520,7 @@ def handle_story_genre(update: Update, context: CallbackContext) -> int:
 
 def generate_story_with_openai(brief: str, genre: str, username: str = "") -> str:
     if client is None:
-        return "❌ لا يوجد إعداد لمفتاح OpenAI حالياً (OPENAI_API_KEY)."
+        return "❌ خدمة الذكاء الاصطناعي غير مفعّلة حالياً، حاول لاحقاً."
 
     user_prompt = (
         f"نوع القصة المطلوب: {genre}\n\n"
@@ -542,7 +541,7 @@ def generate_story_with_openai(brief: str, genre: str, username: str = "") -> st
         story = completion.choices[0].message.content.strip()
         return story
     except Exception as e:
-        logger.exception("OpenAI error: %s", e)
+        logger.exception("AI story error: %s", e)
         return "❌ حدث خطأ أثناء الاتصال بخدمة الذكاء الاصطناعي. حاول مرة أخرى لاحقاً."
 
 
@@ -596,7 +595,7 @@ def review_story_with_openai(text: str, username: str = ""):
             "approved": False,
             "word_count": len(text.split()),
             "title": "",
-            "reasons": "لا يوجد إعداد لمفتاح OpenAI.",
+            "reasons": "خدمة الذكاء الاصطناعي غير مفعّلة حالياً.",
             "suggestions": "",
         }
 
@@ -620,7 +619,7 @@ def review_story_with_openai(text: str, username: str = ""):
         return data
 
     except Exception as e:
-        logger.exception("OpenAI review error: %s", e)
+        logger.exception("AI review error: %s", e)
         return {
             "approved": False,
             "word_count": len(text.split()),
@@ -797,7 +796,7 @@ def receive_publish_story(update: Update, context: CallbackContext) -> int:
 
     return ConversationHandler.END
 
-# ====================== فيديو (Runway) ======================
+# ====================== فيديو ======================
 
 def video_command(update: Update, context: CallbackContext) -> int:
     if update.effective_chat.type != "private":
@@ -822,7 +821,7 @@ def video_command(update: Update, context: CallbackContext) -> int:
 
 def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: str = ""):
     if client is None:
-        return {"status": "error", "error": "No OPENAI client configured."}
+        return {"status": "error", "error": "No AI client configured."}
 
     user_content = f"فكرة الفيديو من المستخدم @{username}:\n{idea}"
     if extra_info:
@@ -845,7 +844,7 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
             logger.error(f"JSON ERROR: {e}\nRAW RESPONSE:\n{raw}")
             return {"status": "error", "error": "JSON parse failed"}
 
-        # 🔁 تطبيع (normalize) الشكل القديم إلى الشكل الذي يفهمه الكود
+        # تطبيع للنسخ القديمة إن رجعت بصيغة مختلفة
         if "status" not in data:
             clarity = data.get("clarity")
             if clarity and clarity != "clear":
@@ -862,7 +861,7 @@ def refine_video_prompt_with_openai(idea: str, extra_info: str = "", username: s
         return data
 
     except Exception as e:
-        logger.exception("OpenAI video prompt error: %s", e)
+        logger.exception("AI video prompt error: %s", e)
         return {"status": "error", "error": "حدث خطأ أثناء تحليل فكرة الفيديو."}
 
 
@@ -877,7 +876,7 @@ def _map_duration_to_runway(seconds: int) -> int:
 
 def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspect_ratio: str = "1280:720"):
     if not RUNWAY_API_KEY:
-        return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
+        return {"ok": False, "error": "Video AI service key is not set."}
 
     mapped_duration = _map_duration_to_runway(duration_seconds)
 
@@ -898,17 +897,17 @@ def create_runway_video_generation(prompt: str, duration_seconds: int = 10, aspe
     try:
         resp = requests.post(RUNWAY_API_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code >= 400:
-            return {"ok": False, "error": f"Runway API error: {resp.status_code} {resp.text}"}
+            return {"ok": False, "error": f"Video AI service error: {resp.status_code} {resp.text}"}
         data = resp.json()
         return {"ok": True, "data": data}
     except Exception as e:
-        logger.exception("Runway API error: %s", e)
-        return {"ok": False, "error": "فشل الاتصال بـ Runway API."}
+        logger.exception("Video AI API error: %s", e)
+        return {"ok": False, "error": "فشل الاتصال بخدمة إنشاء الفيديو بالذكاء الاصطناعي."}
 
 
 def get_runway_task_detail(task_id: str):
     if not RUNWAY_API_KEY:
-        return {"ok": False, "error": "RUNWAY_API_KEY is not set."}
+        return {"ok": False, "error": "Video AI service key is not set."}
 
     headers = {
         "Authorization": f"Bearer {RUNWAY_API_KEY}",
@@ -922,13 +921,13 @@ def get_runway_task_detail(task_id: str):
         if resp.status_code >= 400:
             return {
                 "ok": False,
-                "error": f"Runway task detail error: {resp.status_code} {resp.text}",
+                "error": f"Video task detail error: {resp.status_code} {resp.text}",
                 "status_code": resp.status_code,
             }
         return {"ok": True, "data": resp.json()}
     except Exception as e:
-        logger.exception("Runway task detail error: %s", e)
-        return {"ok": False, "error": "فشل جلب حالة مهمة Runway."}
+        logger.exception("Video task detail error: %s", e)
+        return {"ok": False, "error": "فشل جلب حالة مهمة إنشاء الفيديو."}
 
 
 def wait_for_runway_task(task_id: str, max_wait: int = 60, poll_interval: int = 6):
@@ -1024,7 +1023,7 @@ def send_runway_request_and_reply(
 
     if not runway_resp.get("ok"):
         update.message.reply_text(
-            f"⚠️ تم تجهيز البرومبت، لكن حدث خطأ عند الإرسال إلى Runway:\n{runway_resp.get('error')}",
+            f"⚠️ تم تجهيز برومبت الفيديو، لكن حدث خطأ عند الإرسال إلى خدمة إنشاء الفيديو بالذكاء الاصطناعي:\n{runway_resp.get('error')}",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -1033,12 +1032,12 @@ def send_runway_request_and_reply(
     gen_id = data.get("id", "غير معروف")
 
     update.message.reply_text(
-        "🚀 تم إرسال طلب الفيديو إلى Runway بنجاح.\n"
+        "🚀 تم إرسال طلب إنشاء الفيديو إلى خدمة الذكاء الاصطناعي بنجاح.\n"
         f"🆔 رقم الطلب: `{gen_id}`",
         parse_mode="Markdown",
     )
 
-    update.message.reply_text("⏳ جاري متابعة حالة المهمة على Runway، انتظر قليلاً...")
+    update.message.reply_text("⏳ جاري متابعة حالة مهمة إنشاء الفيديو، انتظر قليلاً...")
 
     wait_result = wait_for_runway_task(gen_id, max_wait=60, poll_interval=6)
 
@@ -1046,13 +1045,13 @@ def send_runway_request_and_reply(
         status = wait_result.get("status")
         if status:
             msg = (
-                f"ℹ️ حالة المهمة الحالية على Runway: *{status}*.\n"
-                "قد يستمر المعالجة هناك، يمكنك متابعة التقدم من لوحة Runway باستخدام رقم الطلب."
+                f"ℹ️ حالة المهمة الحالية في خدمة إنشاء الفيديو: *{status}*.\n"
+                "قد تستمر المعالجة هناك، يمكنك متابعة التقدم من لوحة الخدمة باستخدام رقم الطلب."
             )
             update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
         else:
             update.message.reply_text(
-                "⚠️ لم أستطع التأكد من انتهاء المهمة على Runway الآن.",
+                "⚠️ لم أستطع التأكد من انتهاء مهمة إنشاء الفيديو الآن.",
                 reply_markup=MAIN_KEYBOARD,
             )
         return
@@ -1062,11 +1061,11 @@ def send_runway_request_and_reply(
 
     if video_url:
         try:
-            update.message.reply_text("🎉 تم إنشاء الفيديو على Runway! سأرسله لك الآن...")
+            update.message.reply_text("🎉 تم إنشاء الفيديو بالذكاء الاصطناعي! سأرسله لك الآن...")
             context.bot.send_video(
                 chat_id=update.effective_chat.id,
                 video=video_url,
-                caption="🎬 الفيديو الناتج من Runway.",
+                caption="🎬 الفيديو الناتج من خدمة إنشاء الفيديو بالذكاء الاصطناعي.",
             )
         except Exception as e:
             logger.exception("Telegram send_video error: %s", e)
@@ -1078,8 +1077,8 @@ def send_runway_request_and_reply(
     else:
         pretty = json.dumps(task_data, ensure_ascii=False, indent=2)
         update.message.reply_text(
-            "✅ المهمة انتهت بنجاح في Runway، لكن لم أستطع العثور على رابط الفيديو بشكل واضح.\n"
-            "هذا الكائن المرسل من Runway:\n"
+            "✅ المهمة انتهت بنجاح في خدمة إنشاء الفيديو، لكن لم أستطع العثور على رابط الفيديو بشكل واضح.\n"
+            "هذا الردّ القادم من خدمة الذكاء الاصطناعي:\n"
             f"```json\n{pretty}\n```",
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
@@ -1180,7 +1179,7 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
         update.message.reply_text(
             "✅ تم توليد برومبت احترافي للفيديو.\n"
-            "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو ومتابعة حالته...",
+            "📤 الآن سأرسل الطلب إلى خدمة إنشاء الفيديو بالذكاء الاصطناعي ومتابعة حالته...",
         )
 
         send_runway_request_and_reply(
@@ -1242,7 +1241,7 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 
     update.message.reply_text(
         "✅ تم تجهيز برومبت احترافي للفيديو بعد الأخذ بتفاصيلك.\n"
-        "📤 الآن سأرسل الطلب إلى Runway لإنشاء الفيديو ومتابعة حالته...",
+        "📤 الآن سأرسل الطلب إلى خدمة إنشاء الفيديو بالذكاء الاصطناعي ومتابعة حالته...",
     )
 
     send_runway_request_and_reply(
@@ -1259,14 +1258,14 @@ def handle_video_clarify(update: Update, context: CallbackContext) -> int:
 def video_status_command(update: Update, context: CallbackContext) -> int:
     if update.effective_chat.type != "private":
         update.message.reply_text(
-            "📥 للاستعلام عن حالة فيديو سابق، تواصل معي في الخاص.\n"
+            "📥 للاستعلام عن حالة فيديو سبق إنشاؤه بالذكاء الاصطناعي، تواصل معي في الخاص.\n"
             "افتح البوت واضغط /video_status هناك.",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
 
     update.message.reply_text(
-        "📥 أرسل الآن *رقم الطلب* الذي حصلت عليه من Runway (على شكل UUID):\n"
+        "📥 أرسل الآن *رقم الطلب* الذي حصلت عليه عند إنشاء الفيديو (على شكل UUID):\n"
         "`103d6a74-a651-4a6d-ada5-df8c640117ec` كمثال.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
@@ -1289,7 +1288,7 @@ def handle_video_status(update: Update, context: CallbackContext) -> int:
     result = get_runway_task_detail(task_id)
     if not result.get("ok"):
         update.message.reply_text(
-            f"⚠️ حدث خطأ أثناء جلب حالة الطلب من Runway:\n{result.get('error')}",
+            f"⚠️ حدث خطأ أثناء جلب حالة الطلب من خدمة إنشاء الفيديو:\n{result.get('error')}",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -1298,7 +1297,7 @@ def handle_video_status(update: Update, context: CallbackContext) -> int:
     status = str(data.get("status", "غير معروف")).upper()
 
     base_msg = (
-        f"ℹ️ حالة مهمة الفيديو على Runway:\n\n"
+        f"ℹ️ حالة مهمة الفيديو في خدمة الذكاء الاصطناعي:\n\n"
         f"🆔 رقم الطلب: `{task_id}`\n"
         f"📌 الحالة الحالية: *{status}*"
     )
@@ -1314,7 +1313,7 @@ def handle_video_status(update: Update, context: CallbackContext) -> int:
                 update.message.bot.send_video(
                     chat_id=update.effective_chat.id,
                     video=video_url,
-                    caption="🎬 الفيديو الناتج من Runway لهذا الطلب.",
+                    caption="🎬 الفيديو الناتج من خدمة إنشاء الفيديو بالذكاء الاصطناعي لهذا الطلب.",
                 )
             except Exception as e:
                 logger.exception("Telegram send_video (status) error: %s", e)
@@ -1330,7 +1329,7 @@ def handle_video_status(update: Update, context: CallbackContext) -> int:
             update.message.reply_text(
                 base_msg
                 + "\n\n✅ المهمة ناجحة، لكن لم أستطع العثور على رابط الفيديو بشكل واضح.\n"
-                "هذا الكائن المرسل من Runway:\n"
+                "هذا الردّ القادم من خدمة إنشاء الفيديو:\n"
                 f"```json\n{pretty}\n```",
                 parse_mode="Markdown",
                 reply_markup=MAIN_KEYBOARD,
@@ -1362,7 +1361,7 @@ def image_command(update: Update, context: CallbackContext) -> int:
         "• غلاف لقصة غموض في مدينة الرياض ليلاً مع ضباب.\n"
         "• طفل يقرأ كتاباً في مكتبة قديمة، أسلوب كرتوني.\n"
         "• منظر سينمائي لجزيرة مهجورة وقت الغروب.\n\n"
-        "سأحوّل وصفك إلى برومبت احترافي وأنتج لك صورة.",
+        "سأحوّل وصفك إلى برومبت احترافي وأنتج لك صورة بالذكاء الاصطناعي.",
         reply_markup=ReplyKeyboardRemove(),
     )
     return STATE_IMAGE_PROMPT
@@ -1384,7 +1383,7 @@ def generate_image_prompt_with_openai(description: str) -> str:
         prompt = completion.choices[0].message.content.strip()
         return prompt
     except Exception as e:
-        logger.exception("OpenAI image prompt error: %s", e)
+        logger.exception("AI image prompt error: %s", e)
         return ""
 
 
@@ -1397,7 +1396,7 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
     if not require_and_deduct(update, IMAGE_COST_POINTS):
         return ConversationHandler.END
 
-    update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة...")
+    update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة بالذكاء الاصطناعي...")
 
     refined_prompt = generate_image_prompt_with_openai(desc)
     if not refined_prompt:
@@ -1409,7 +1408,7 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
 
     if client is None:
         update.message.reply_text(
-            "❌ إعداد OpenAI Images غير مكتمل حالياً.",
+            "❌ خدمة إنشاء الصور بالذكاء الاصطناعي غير مفعّلة حالياً.",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -1423,21 +1422,21 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
         )
 
         if not img_resp.data or not getattr(img_resp.data[0], "url", None):
-            raise RuntimeError("No URL returned from OpenAI Images")
+            raise RuntimeError("No URL returned from image service")
 
         image_url = img_resp.data[0].url
 
     except Exception as e:
-        logger.exception("OpenAI image generation error: %s", e)
+        logger.exception("AI image generation error: %s", e)
         update.message.reply_text(
-            f"❌ حدث خطأ أثناء توليد الصورة من OpenAI:\n`{type(e).__name__}: {e}`",
+            f"❌ حدث خطأ أثناء توليد الصورة بخدمة الذكاء الاصطناعي:\n`{type(e).__name__}: {e}`",
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
 
     caption = (
-        "🖼 هذه هي الصورة الناتجة عن وصفك.\n"
+        "🖼 هذه هي الصورة الناتجة عن وصفك بالذكاء الاصطناعي.\n"
         "إذا أعجبتك، يمكنك حفظها أو استخدامها كغلاف لقصة في مرويات."
     )
     update.message.reply_photo(photo=image_url, caption=caption, reply_markup=MAIN_KEYBOARD)
