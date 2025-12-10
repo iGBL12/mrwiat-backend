@@ -258,7 +258,13 @@ def myid_command(update: Update, context: CallbackContext):
 
 
 def _get_or_create_user_and_wallet(db: Session, tg_user) -> tuple[User, Wallet]:
-    """يرجع User + Wallet من DB أو يقوم بإنشائهما."""
+    """يرجع User + Wallet من DB أو يقوم بإنشائهما.
+       المستخدم الجديد يحصل تلقائياً على 5 نقاط مجانية."""
+    
+    user_created = False
+    wallet_created = False
+
+    # --- إنشاء المستخدم إذا لم يكن موجوداً ---
     user = db.query(User).filter(User.telegram_id == tg_user.id).first()
     if not user:
         user = User(
@@ -268,12 +274,21 @@ def _get_or_create_user_and_wallet(db: Session, tg_user) -> tuple[User, Wallet]:
         )
         db.add(user)
         db.flush()
+        user_created = True
 
+    # --- إنشاء المحفظة إذا لم تكن موجودة ---
     wallet = user.wallet
     if wallet is None:
         wallet = Wallet(user_id=user.id, balance_cents=0)
         db.add(wallet)
-        db.flush()
+        wallet_created = True
+
+        # 🎁 مكافأة ترحيبية للمستخدم الجديد
+        wallet.balance_cents = 5   # 5 نقاط مجانية
+
+    # --- حفظ التغييرات ---
+    if user_created or wallet_created:
+        db.commit()
 
     return user, wallet
 
@@ -471,6 +486,15 @@ def handle_redeem_code(update: Update, context: CallbackContext) -> int:
 # =============== /start ===============
 
 def start(update: Update, context: CallbackContext) -> None:
+    user = update.effective_user
+    db = SessionLocal()
+    u, w = _get_or_create_user_and_wallet(db, user)
+    welcome_bonus_msg = ""
+    if w.balance_cents == 5:
+        welcome_bonus_msg = "🎁 لقد حصلت على *5 نقاط مجانية* هدية ترحيبية!"
+
+
+
     update.message.reply_text(
         "👋 أهلاً بك في بوت مرويات للقصص.\n\n"
         "المميزات المتاحة حالياً:\n"
