@@ -536,9 +536,9 @@ def article_command(update: Update, context: CallbackContext) -> int:
         "📄 أرسل الآن *ملف PDF* للمقال.\n\n"
         "⚠️ شرط مهم:\n"
         "اسم الملف يجب أن يبدأ بـ:\n"
-        "`مقال | اسم المقال`\n\n"
+        "`مقال - اسم المقال`\n\n"
         "مثال:\n"
-        "`مقال | أثر القراءة على التفكير.pdf`",
+        "`مقال - أثر القراءة على التفكير.pdf`",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -1000,7 +1000,7 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
     try:
         caption = (
             f"📖 *{title}*\n"
-            f"✍️ من القارئ: @{username}\n\n"
+            f"✍️ من الكاتب: @{username}\n\n"
             "قسم: قصص المجتمع — منصة مرويات."
         )
 
