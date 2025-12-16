@@ -275,7 +275,12 @@ def article_command(update: Update, context: CallbackContext) -> int:
 
     update.message.reply_text(
         "📄 أرسل الآن *ملف PDF* للمقال.\n\n"
-        "سيتم مراجعته تلقائيًا قبل النشر.",
+        "⚠️ شرط مهم قبل الإرسال:\n"
+        "يجب أن يكون *اسم الملف* بالشكل التالي:\n\n"
+        "✅ مقال - اسم المقال.pdf\n\n"
+        "مثال صحيح:\n"
+        "مقال - أثر القراءة على التركيز.pdf\n\n"
+        "أي ملف باسم مختلف سيتم رفضه تلقائيًا.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
@@ -292,31 +297,97 @@ def article_pdf_command(update: Update, context: CallbackContext) -> int:
 
 def handle_article_pdf(update: Update, context: CallbackContext) -> int:
     doc = update.message.document
+
+    # ================== تحقق من وجود ملف PDF ==================
     if not doc or doc.mime_type != "application/pdf":
-        update.message.reply_text("PDF فقط")
+        update.message.reply_text(
+            "❗ من فضلك أرسل *ملف PDF فقط* لرفع المقال.",
+            parse_mode="Markdown",
+        )
         return STATE_ARTICLE_PDF
 
-    bio = BytesIO()
-    doc.get_file().download(out=bio)
-    bio.seek(0)
+    # ================== شرط اسم الملف ==================
+    file_name = (doc.file_name or "").strip()
 
-    reader = PyPDF2.PdfReader(bio)
-    text = "".join([(p.extract_text() or "") for p in reader.pages])
+    if not file_name.startswith("مقال -"):
+        update.message.reply_text(
+            "❌ *اسم ملف المقال غير مطابق للشروط.*\n\n"
+            f"📄 اسم الملف الذي أرسلته:\n`{file_name}`\n\n"
+            "✅ الصيغة الصحيحة المطلوبة:\n"
+            "`مقال - اسم المقال.pdf`\n\n"
+            "📌 مثال صحيح:\n"
+            "`مقال - أثر القراءة على التركيز.pdf`\n\n"
+            "✍️ رجاءً أعد تسمية الملف ثم أرسله مرة أخرى.",
+            parse_mode="Markdown",
+        )
+        return STATE_ARTICLE_PDF
 
-    review = review_article_with_openai(text)
-    if not review.get("approved"):
-        update.message.reply_text(f"🚫 مرفوض:\n{review.get('reasons')}")
-        return ConversationHandler.END
-
-    context.bot.send_document(
-        chat_id=int(COMMUNITY_CHAT_ID),
-        message_thread_id=ARTICLES_TOPIC_ID,
-        document=doc.file_id,
-        caption="📝 مقال جديد — مرويات",
-        parse_mode="Markdown",
+    update.message.reply_text(
+        "🔍 جاري قراءة المقال ومراجعته، الرجاء الانتظار...",
     )
 
-    update.message.reply_text("✅ تم النشر")
+    # ================== تحميل وقراءة PDF ==================
+    try:
+        bio = BytesIO()
+        doc.get_file().download(out=bio)
+        bio.seek(0)
+
+        reader = PyPDF2.PdfReader(bio)
+        text = ""
+
+        for page in reader.pages:
+            text += (page.extract_text() or "") + "\n"
+
+    except Exception as e:
+        logger.exception("PDF read error: %s", e)
+        update.message.reply_text(
+            "❌ حدث خطأ أثناء قراءة ملف الـ PDF.\n"
+            "تأكد أن الملف غير تالف ثم حاول مرة أخرى."
+        )
+        return ConversationHandler.END
+
+    if not text.strip():
+        update.message.reply_text(
+            "❌ لم أتمكن من استخراج أي نص من ملف الـ PDF.\n"
+            "تأكد أن الملف يحتوي على نص قابل للقراءة."
+        )
+        return ConversationHandler.END
+
+    # ================== مراجعة المقال بالذكاء الاصطناعي ==================
+    review = review_article_with_openai(text)
+
+    if not review.get("approved"):
+        update.message.reply_text(
+            "🚫 *تم رفض المقال بعد المراجعة.*\n\n"
+            f"📌 السبب:\n{review.get('reasons')}",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
+
+    # ================== نشر المقال في القروب داخل Topic ==================
+    try:
+        context.bot.send_document(
+            chat_id=int(COMMUNITY_CHAT_ID),
+            message_thread_id=ARTICLES_TOPIC_ID,
+            document=doc.file_id,
+            caption="📝 *مقال جديد*\n\n📚 مجتمع مرويات",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.exception("Send article PDF error: %s", e)
+        update.message.reply_text(
+            "⚠️ تم قبول المقال، لكن حدث خطأ أثناء نشره في القروب.\n"
+            "سيتم مراجعته يدويًا من الإدارة.",
+        )
+        return ConversationHandler.END
+
+    # ================== تأكيد للمستخدم ==================
+    update.message.reply_text(
+        "✅ تم نشر مقالك بنجاح بعد المراجعة 🌟\n"
+        "شكرًا لمساهمتك في مجتمع مرويات.",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
     return ConversationHandler.END
 
 def review_article_with_openai(text: str):
@@ -1574,28 +1645,22 @@ def main() -> None:
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # أوامر أساسية
+    # ================== أوامر أساسية ==================
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("pricing", pricing_command))
     dp.add_handler(CommandHandler("wallet", wallet_command))
     dp.add_handler(CommandHandler("myid", myid_command))
     dp.add_handler(CommandHandler("id", myid_command))
 
-    # أزرار المحفظة والأسعار
+    # ================== أزرار المحفظة والأسعار ==================
     dp.add_handler(
-        MessageHandler(
-            Filters.regex("^💳 المحفظة / الشحن$"),
-            wallet_command,
-        )
+        MessageHandler(Filters.regex("^💳 المحفظة / الشحن$"), wallet_command)
     )
     dp.add_handler(
-        MessageHandler(
-            Filters.regex("^💰 الأسعار والنقاط$"),
-            pricing_command,
-        )
+        MessageHandler(Filters.regex("^💰 الأسعار والنقاط$"), pricing_command)
     )
 
-    # كتابة قصة
+    # ================== كتابة قصة ==================
     story_conv = ConversationHandler(
         entry_points=[
             CommandHandler("write", write_command),
@@ -1617,7 +1682,7 @@ def main() -> None:
     )
     dp.add_handler(story_conv)
 
-    # نشر قصة
+    # ================== نشر قصة ==================
     publish_conv = ConversationHandler(
         entry_points=[
             CommandHandler("publish", publish_command),
@@ -1629,10 +1694,7 @@ def main() -> None:
         states={
             STATE_PUBLISH_STORY: [
                 MessageHandler(Filters.document.pdf, handle_pdf_story),
-                MessageHandler(
-                    Filters.text & ~Filters.command,
-                    receive_publish_story,
-                ),
+                MessageHandler(Filters.text & ~Filters.command, receive_publish_story),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -1640,7 +1702,7 @@ def main() -> None:
     )
     dp.add_handler(publish_conv)
 
-    # فيديو
+    # ================== فيديو ==================
     video_conv = ConversationHandler(
         entry_points=[
             CommandHandler("video", video_command),
@@ -1665,7 +1727,7 @@ def main() -> None:
     )
     dp.add_handler(video_conv)
 
-    # حالة فيديو
+    # ================== حالة فيديو ==================
     video_status_conv = ConversationHandler(
         entry_points=[
             CommandHandler("video_status", video_status_command),
@@ -1684,7 +1746,7 @@ def main() -> None:
     )
     dp.add_handler(video_status_conv)
 
-    # صورة
+    # ================== صورة ==================
     image_conv = ConversationHandler(
         entry_points=[
             CommandHandler("image", image_command),
@@ -1703,7 +1765,7 @@ def main() -> None:
     )
     dp.add_handler(image_conv)
 
-    # شحن برمز من سلة
+    # ================== شحن برمز من سلة ==================
     redeem_conv = ConversationHandler(
         entry_points=[
             CommandHandler("redeem", redeem_command),
@@ -1721,26 +1783,25 @@ def main() -> None:
         allow_reentry=True,
     )
     dp.add_handler(redeem_conv)
-    # أمر رفع مقال
-    dp.add_handler(CommandHandler("article", article_command))
 
-    # زر رفع مقال
-    dp.add_handler(
-        MessageHandler(
-        Filters.regex("^📝 رفع مقال PDF$"),
-        article_command,
-        )
-    )
-
-# Conversation رفع المقال
+    # ================== رفع مقال PDF (المهم) ==================
     article_conv = ConversationHandler(
-    entry_points=[
-        CommandHandler("article", article_command),
-        MessageHandler(Filters.regex("^📝 رفع مقال PDF$"), article_command),
+        entry_points=[
+            CommandHandler("article", article_command),
+            MessageHandler(
+                Filters.regex("^📝 رفع مقال PDF$"),
+                article_command,
+            ),
         ],
         states={
-        STATE_ARTICLE_PDF: [
-            MessageHandler(Filters.document.pdf, handle_article_pdf)
+            STATE_ARTICLE_PDF: [
+                MessageHandler(Filters.document.pdf, handle_article_pdf),
+                MessageHandler(
+                    Filters.all & ~Filters.document.pdf,
+                    lambda u, c: u.message.reply_text(
+                        "❗ من فضلك أرسل ملف PDF فقط."
+                    ),
+                ),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -1748,9 +1809,7 @@ def main() -> None:
     )
     dp.add_handler(article_conv)
 
-    
-
-
+    # ================== تشغيل البوت ==================
     updater.start_polling()
     updater.idle()
 
