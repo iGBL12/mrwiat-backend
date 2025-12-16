@@ -104,7 +104,7 @@ STATE_ARTICLE_REVIEW = 20
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["✍️ كتابة قصة بالذكاء الاصطناعي"],
-        ["📤 نشر قصة من كتابتك"],
+        ["📤 نشر قصة من كتابتك", "📰 رفع مقال PDF"],
         ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
         ["📥 استعلام عن فيديو سابق"],
         ["💰 الأسعار والنقاط", "💳 المحفظة / الشحن"],
@@ -1730,6 +1730,13 @@ def cancel(update: Update, context: CallbackContext) -> int:
 def main() -> None:
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
+    dp.add_handler(
+    MessageHandler(
+        Filters.regex("^📰 رفع مقال PDF$"),
+        article_command,
+        )
+    )
+
 
     # ===================== أوامر أساسية =====================
     dp.add_handler(CommandHandler("start", start))
