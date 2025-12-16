@@ -57,7 +57,8 @@ RUNWAY_TASKS_URL = os.environ.get(
     "https://api.dev.runwayml.com/v1/tasks",
 )
 
-COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")
+COMMUNITY_CHAT_URL = os.environ.get("COMMUNITY_CHAT_URL")
+ARTICLES_CHAT_URL = os.environ.get("ARTICLES_CHAT_URL")
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
@@ -97,6 +98,7 @@ STATE_IMAGE_PROMPT = 6
 STATE_VIDEO_DURATION = 7
 STATE_VIDEO_STATUS_ID = 8
 STATE_REDEEM_CODE = 9
+STATE_ARTICLE_REVIEW = 20
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -230,6 +232,31 @@ VIDEO_PROMPT_SYSTEM = """
 }
 
 لا تخرج عن هذا الشكل أبداً، ولا تضف أي مفاتيح أو نصوص أخرى خارج هذا الـ JSON.
+"""
+ARTICLE_REVIEW_PROMPT = """
+أنت مدقق محتوى محترف لمنصة عربية.
+
+سيتم تزويدك بنص مقال كامل.
+مهمتك التحقق مما يلي بدقة:
+
+1. التأكد أن المقال:
+- لا يتناول السياسة أو الأحزاب أو الحكومات.
+- خالٍ من العنصرية أو خطاب الكراهية.
+- لا يحتوي تحريضًا أو إساءة أو تمييزًا.
+- لا يحتوي محتوى إباحي أو غير لائق.
+- مناسب للنشر العام.
+
+2. أعد النتيجة بصيغة JSON فقط وبدون أي شرح إضافي:
+
+{
+  "approved": true أو false,
+  "violations": [
+    "اذكر نوع المخالفة إن وجدت (سياسة / عنصرية / تحريض / محتوى غير لائق)"
+  ],
+  "summary": "ملخص قصير جداً عن سبب القبول أو الرفض"
+}
+
+❗ لا تُرجع أي نص خارج JSON.
 """
 
 IMAGE_PROMPT_SYSTEM = """
@@ -461,6 +488,195 @@ def redeem_code_logic(tg_user, raw_text: str):
     finally:
         db.close()
 
+def build_article_caption(filename: str, username: str) -> str:
+    title = filename.replace(".pdf", "").replace("مقال |", "").strip()
+    return (
+        f"📰 *{title}*\n"
+        f"✍️ الكاتب: @{username}\n\n"
+        "قسم: المقالات — منصة مرويات"
+    )
+
+def review_article_with_openai(text: str):
+    if client is None:
+        return {
+            "approved": False,
+            "violations": ["خدمة الذكاء الاصطناعي غير مفعّلة"],
+            "summary": "لا يمكن فحص المقال حالياً"
+        }
+
+    try:
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": ARTICLE_REVIEW_PROMPT},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.2,
+        )
+
+        raw = completion.choices[0].message.content.strip()
+        return json.loads(raw)
+
+    except Exception as e:
+        logger.exception("Article review error: %s", e)
+        return {
+            "approved": False,
+            "violations": ["خطأ تقني أثناء فحص المقال"],
+            "summary": "حدث خطأ أثناء التحليل"
+        }
+def article_command(update: Update, context: CallbackContext) -> int:
+    if update.effective_chat.type != "private":
+        update.message.reply_text(
+            "📄 لفحص مقال PDF، تواصل معي في الخاص.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "📄 أرسل الآن *ملف PDF* للمقال.\n\n"
+        "⚠️ شرط مهم:\n"
+        "اسم الملف يجب أن يبدأ بـ:\n"
+        "`مقال | اسم المقال`\n\n"
+        "مثال:\n"
+        "`مقال | أثر القراءة على التفكير.pdf`",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+    return STATE_ARTICLE_REVIEW
+def handle_article_pdf(update: Update, context: CallbackContext) -> int:
+    doc = update.message.document
+
+    # 1️⃣ تحقق من وجود ملف PDF
+    if not doc or doc.mime_type != "application/pdf":
+        update.message.reply_text(
+            "❗ من فضلك أرسل ملف PDF صالح للمقال."
+        )
+        return STATE_ARTICLE_REVIEW
+
+    filename = doc.file_name or ""
+
+    # 2️⃣ تحقق من اسم الملف
+    if not filename.startswith("مقال |"):
+        update.message.reply_text(
+            "❌ اسم الملف غير صحيح.\n\n"
+            "يجب أن يبدأ اسم الملف بـ:\n"
+            "`مقال | اسم المقال`\n\n"
+            "مثال:\n"
+            "`مقال | أثر القراءة على التفكير.pdf`",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
+
+    user = update.effective_user
+    username = user.username or user.first_name or "كاتب مرويات"
+
+    update.message.reply_text(
+        "🔍 تم استلام المقال.\n"
+        "جاري قراءة الملف وفحص المحتوى للتأكد من خلوه من المخالفات..."
+    )
+
+    # 3️⃣ قراءة ملف PDF
+    try:
+        file = doc.get_file()
+        bio = BytesIO()
+        file.download(out=bio)
+        bio.seek(0)
+
+        reader = PyPDF2.PdfReader(bio)
+        full_text = ""
+
+        for page in reader.pages:
+            full_text += (page.extract_text() or "") + "\n"
+
+    except Exception as e:
+        logger.exception("PDF article read error: %s", e)
+        update.message.reply_text(
+            "❌ حدث خطأ أثناء قراءة ملف الـ PDF."
+        )
+        return ConversationHandler.END
+
+    text = full_text.strip()
+
+    if not text:
+        update.message.reply_text(
+            "❌ لم أتمكن من استخراج أي نص من المقال."
+        )
+        return ConversationHandler.END
+
+    # 4️⃣ حد أقصى للنص المرسل للذكاء الاصطناعي
+    MAX_CHARS = 15000
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS]
+
+    # 5️⃣ فحص المقال بالذكاء الاصطناعي
+    review = review_article_with_openai(text)
+
+    approved = bool(review.get("approved"))
+    violations = review.get("violations", [])
+    summary = review.get("summary", "")
+
+    # 6️⃣ في حال وجود مخالفات
+    if not approved:
+        msg = (
+            "🚫 *تم رفض المقال*\n\n"
+            "⚠️ تم اكتشاف المخالفات التالية:\n"
+        )
+
+        for v in violations:
+            msg += f"- {v}\n"
+
+        if summary:
+            msg += f"\n📝 ملاحظات:\n{summary}"
+
+        update.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    # 7️⃣ المقال سليم ➜ نشره في قروب المقالات
+    articles_chat = normalize_chat_target(ARTICLES_CHAT_URL)
+
+    if not articles_chat:
+        update.message.reply_text(
+            "✅ المقال سليم، لكن لم يتم ضبط مكان نشر المقالات في الإعدادات.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    try:
+        title = filename.replace(".pdf", "").replace("مقال |", "").strip()
+
+        caption = (
+            f"📰 *{title}*\n"
+            f"✍️ الكاتب: @{username}\n\n"
+            "قسم: المقالات — منصة مرويات"
+        )
+
+        context.bot.send_document(
+            chat_id=articles_chat,
+            document=doc.file_id,
+            caption=caption,
+            parse_mode="Markdown",
+        )
+
+        update.message.reply_text(
+            "🎉 *تم فحص المقال بنجاح ونشره في قسم المقالات.*\n"
+            "شكرًا لمساهمتك ✨",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+    except Exception as e:
+        logger.exception("Error sending article to articles group: %s", e)
+        update.message.reply_text(
+            "⚠️ المقال سليم، لكن حدث خطأ أثناء نشره في القروب.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+
+    return ConversationHandler.END
 
 def handle_redeem_code(update: Update, context: CallbackContext) -> int:
     """يستقبل الكود من المستخدم ويشحن المحفظة."""
@@ -482,6 +698,24 @@ def handle_redeem_code(update: Update, context: CallbackContext) -> int:
             parse_mode="Markdown",
         )
         return STATE_REDEEM_CODE
+
+def normalize_chat_target(chat_url):
+    if not chat_url:
+        return None
+
+    chat_url = chat_url.strip()
+
+    if chat_url.startswith("https://t.me/"):
+        return "@" + chat_url.split("https://t.me/")[-1]
+
+    if chat_url.startswith("t.me/"):
+        return "@" + chat_url.split("t.me/")[-1]
+
+    if chat_url.startswith("@"):
+        return chat_url
+
+    return chat_url
+
 
 # =============== /start ===============
 
@@ -725,6 +959,7 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
     reasons = review.get("reasons") or ""
     suggestions = review.get("suggestions") or ""
 
+    # ❌ غير مقبولة
     if not approved:
         msg = (
             f"🔎 تم تحليل قصتك من ملف الـPDF.\n"
@@ -735,40 +970,50 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
             msg += f"\nالسبب الرئيسي:\n{reasons}\n"
         if suggestions:
             msg += f"\nبعض الاقتراحات للتحسين:\n{suggestions}\n"
-        update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+
+        update.message.reply_text(
+            msg,
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
         return ConversationHandler.END
 
-    msg = (
+    # ✅ مقبولة
+    update.message.reply_text(
         f"✅ تم تحليل قصتك من ملف الـPDF.\n"
         f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n"
         "📣 النتيجة: *صالحة للنشر في قسم قصص المجتمع*.\n\n"
-        "🚀 سيتم الآن نشر ملف الـPDF في مجتمع مرويات باسمك."
+        "🚀 سيتم الآن نشر ملف الـPDF في مجتمع مرويات باسمك.",
+        parse_mode="Markdown",
     )
-    update.message.reply_text(msg, parse_mode="Markdown")
 
-    if COMMUNITY_CHAT_ID:
-        try:
-            caption = (
-                f"📖 *{title}*\n"
-                f"✍️ من القارئ: @{username}\n\n"
-                "قسم: قصص المجتمع — منصة مرويات."
-            )
-            context.bot.send_document(
-                chat_id=int(COMMUNITY_CHAT_ID),
-                document=doc.file_id,
-                caption=caption,
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            logger.exception("Error sending PDF to community: %s", e)
-            update.message.reply_text(
-                "⚠️ تم قبول القصة، لكن حدث خطأ أثناء نشرها في المجتمع.",
-                reply_markup=MAIN_KEYBOARD,
-            )
-            return ConversationHandler.END
-    else:
+    community_chat = normalize_chat_target(COMMUNITY_CHAT_URL)
+
+    if not community_chat:
         update.message.reply_text(
-            "✅ القصة مقبولة، لكن لم يتم ضبط COMMUNITY_CHAT_ID في الإعدادات.",
+            "✅ القصة مقبولة، لكن لم يتم ضبط COMMUNITY_CHAT_URL في الإعدادات.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    try:
+        caption = (
+            f"📖 *{title}*\n"
+            f"✍️ من القارئ: @{username}\n\n"
+            "قسم: قصص المجتمع — منصة مرويات."
+        )
+
+        context.bot.send_document(
+            chat_id=community_chat,
+            document=doc.file_id,
+            caption=caption,
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        logger.exception("Error sending PDF to community: %s", e)
+        update.message.reply_text(
+            "⚠️ تم قبول القصة، لكن حدث خطأ أثناء نشرها في المجتمع.",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -778,6 +1023,7 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
         "شكرًا لمشاركتك 🌟",
         reply_markup=MAIN_KEYBOARD,
     )
+
     return ConversationHandler.END
 
 
@@ -1481,8 +1727,177 @@ def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 # =============== main ===============
-
 def main() -> None:
+    updater = Updater(BOT_TOKEN, use_context=True)
+    dp = updater.dispatcher
+
+    # ===================== أوامر أساسية =====================
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("pricing", pricing_command))
+    dp.add_handler(CommandHandler("wallet", wallet_command))
+    dp.add_handler(CommandHandler("myid", myid_command))
+    dp.add_handler(CommandHandler("id", myid_command))
+
+    # ===================== أزرار المحفظة والأسعار =====================
+    dp.add_handler(
+        MessageHandler(
+            Filters.regex("^💳 المحفظة / الشحن$"),
+            wallet_command,
+        )
+    )
+    dp.add_handler(
+        MessageHandler(
+            Filters.regex("^💰 الأسعار والنقاط$"),
+            pricing_command,
+        )
+    )
+
+    # ===================== كتابة قصة =====================
+    story_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("write", write_command),
+            MessageHandler(
+                Filters.regex("^✍️ كتابة قصة بالذكاء الاصطناعي$"),
+                write_command,
+            ),
+        ],
+        states={
+            STATE_STORY_GENRE: [
+                MessageHandler(Filters.text & ~Filters.command, handle_story_genre)
+            ],
+            STATE_STORY_BRIEF: [
+                MessageHandler(Filters.text & ~Filters.command, receive_story_brief)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(story_conv)
+
+    # ===================== نشر قصة =====================
+    publish_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("publish", publish_command),
+            MessageHandler(
+                Filters.regex("^📤 نشر قصة من كتابتك$"),
+                publish_command,
+            ),
+        ],
+        states={
+            STATE_PUBLISH_STORY: [
+                MessageHandler(Filters.document.pdf, handle_pdf_story),
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    receive_publish_story,
+                ),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(publish_conv)
+
+    # ===================== فيديو =====================
+    video_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("video", video_command),
+            MessageHandler(
+                Filters.regex("^🎬 إنتاج فيديو بالذكاء الاصطناعي$"),
+                video_command,
+            ),
+        ],
+        states={
+            STATE_VIDEO_IDEA: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_idea)
+            ],
+            STATE_VIDEO_DURATION: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_duration)
+            ],
+            STATE_VIDEO_CLARIFY: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_clarify)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(video_conv)
+
+    # ===================== حالة فيديو =====================
+    video_status_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("video_status", video_status_command),
+            MessageHandler(
+                Filters.regex("^📥 استعلام عن فيديو سابق$"),
+                video_status_command,
+            ),
+        ],
+        states={
+            STATE_VIDEO_STATUS_ID: [
+                MessageHandler(Filters.text & ~Filters.command, handle_video_status)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(video_status_conv)
+
+    # ===================== صور =====================
+    image_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("image", image_command),
+            MessageHandler(
+                Filters.regex("^🖼 إنشاء صورة بالذكاء الاصطناعي$"),
+                image_command,
+            ),
+        ],
+        states={
+            STATE_IMAGE_PROMPT: [
+                MessageHandler(Filters.text & ~Filters.command, handle_image_prompt)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(image_conv)
+
+    # ===================== شحن برمز من سلة =====================
+    redeem_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("redeem", redeem_command),
+            MessageHandler(
+                Filters.regex("^(🎟 )?شحن برمز من سلة$"),
+                redeem_command,
+            ),
+        ],
+        states={
+            STATE_REDEEM_CODE: [
+                MessageHandler(Filters.text & ~Filters.command, handle_redeem_code)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(redeem_conv)
+
+    # ===================== 📰 فحص ونشر المقالات (NEW) =====================
+    article_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("article", article_command),
+        ],
+        states={
+            STATE_ARTICLE_REVIEW: [
+                MessageHandler(Filters.document.pdf, handle_article_pdf)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
+    )
+    dp.add_handler(article_conv)
+
+    # ===================== تشغيل البوت =====================
+    updater.start_polling()
+    updater.idle()
+
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
@@ -1528,6 +1943,18 @@ def main() -> None:
         allow_reentry=True,
     )
     dp.add_handler(story_conv)
+
+    article_conv = ConversationHandler(
+    entry_points=[CommandHandler("article", article_command)],
+    states={
+        STATE_ARTICLE_REVIEW: [
+            MessageHandler(Filters.document.pdf, handle_article_pdf)
+        ],
+    },
+    fallbacks=[CommandHandler("cancel", cancel)],
+)
+
+
 
     # نشر قصة
     publish_conv = ConversationHandler(
