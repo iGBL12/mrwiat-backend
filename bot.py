@@ -99,12 +99,14 @@ STATE_IMAGE_PROMPT = 6
 STATE_VIDEO_DURATION = 7
 STATE_VIDEO_STATUS_ID = 8
 STATE_REDEEM_CODE = 9
+STATE_ARTICLE_PDF = 50
 
 # لوحة الأزرار الرئيسية
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["✍️ كتابة قصة بالذكاء الاصطناعي"],
         ["📤 نشر قصة من كتابتك"],
+        ["📝 رفع مقال PDF"],
         ["🎬 إنتاج فيديو بالذكاء الاصطناعي", "🖼 إنشاء صورة بالذكاء الاصطناعي"],
         ["📥 استعلام عن فيديو سابق"],
         ["💰 الأسعار والنقاط", "💳 المحفظة / الشحن"],
@@ -263,6 +265,22 @@ IMAGE_PROMPT_SYSTEM = """
 """
 
 # =============== دوال المستخدم والمحفظة ===============
+def article_command(update: Update, context: CallbackContext) -> int:
+    if update.effective_chat.type != "private":
+        update.message.reply_text(
+            "📝 لرفع مقال، تواصل معي في الخاص.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    update.message.reply_text(
+        "📄 أرسل الآن *ملف PDF* للمقال.\n\n"
+        "سيتم مراجعته تلقائيًا قبل النشر.",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return STATE_ARTICLE_PDF
+
 def article_pdf_command(update: Update, context: CallbackContext) -> int:
     if update.effective_chat.type != "private":
         update.message.reply_text("أرسل المقال في الخاص")
@@ -1703,16 +1721,34 @@ def main() -> None:
         allow_reentry=True,
     )
     dp.add_handler(redeem_conv)
+    # أمر رفع مقال
+    dp.add_handler(CommandHandler("article", article_command))
+
+    # زر رفع مقال
+    dp.add_handler(
+        MessageHandler(
+        Filters.regex("^📝 رفع مقال PDF$"),
+        article_command,
+        )
+    )
+
+# Conversation رفع المقال
     article_conv = ConversationHandler(
-    entry_points=[CommandHandler("article_pdf", article_pdf_command)],
+    entry_points=[
+        CommandHandler("article", article_command),
+        MessageHandler(Filters.regex("^📝 رفع مقال PDF$"), article_command),
+        ],
         states={
-            STATE_ARTICLE_PDF: [
-                MessageHandler(Filters.document.pdf, handle_article_pdf)
+        STATE_ARTICLE_PDF: [
+            MessageHandler(Filters.document.pdf, handle_article_pdf)
             ],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
     dp.add_handler(article_conv)
+
+    
 
 
     updater.start_polling()
