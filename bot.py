@@ -58,6 +58,8 @@ RUNWAY_TASKS_URL = os.environ.get(
 )
 
 COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")
+ARTICLES_TOPIC_ID = int(os.environ.get("ARTICLES_TOPIC_ID", "0"))
+STATE_ARTICLE_PDF = 50
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in environment variables")
@@ -159,6 +161,23 @@ SYSTEM_PROMPT = """
 
 هدفك النهائي هو كتابة قصة ممتعة بجودة عالية تجعل القارئ يشعر بأنه يشاهد فيلمًا قصيرًا مكتوبًا بإتقان.
 """
+ARTICLE_REVIEW_PROMPT = """
+أنت مراجع محتوى صارم لمنصة "مرويات".
+
+تحقق من نص مقال مستخرج من PDF.
+ارفضه إن احتوى على:
+- ألفاظ نابية
+- عنصرية أو كراهية
+- سياسة
+- ذكر أو إساءة لعائلة حاكمة
+
+أعد JSON فقط:
+
+{
+  "approved": true أو false,
+  "reasons": "سبب الرفض أو القبول"
+}
+"""
 
 REVIEW_PROMPT = """
 أنت محرر رئيسي في منصة "مرويات" للقصص العربية.
@@ -244,6 +263,57 @@ IMAGE_PROMPT_SYSTEM = """
 """
 
 # =============== دوال المستخدم والمحفظة ===============
+def article_pdf_command(update: Update, context: CallbackContext) -> int:
+    if update.effective_chat.type != "private":
+        update.message.reply_text("أرسل المقال في الخاص")
+        return ConversationHandler.END
+
+    update.message.reply_text("📄 أرسل ملف PDF للمقال")
+    return STATE_ARTICLE_PDF
+
+
+def handle_article_pdf(update: Update, context: CallbackContext) -> int:
+    doc = update.message.document
+    if not doc or doc.mime_type != "application/pdf":
+        update.message.reply_text("PDF فقط")
+        return STATE_ARTICLE_PDF
+
+    bio = BytesIO()
+    doc.get_file().download(out=bio)
+    bio.seek(0)
+
+    reader = PyPDF2.PdfReader(bio)
+    text = "".join([(p.extract_text() or "") for p in reader.pages])
+
+    review = review_article_with_openai(text)
+    if not review.get("approved"):
+        update.message.reply_text(f"🚫 مرفوض:\n{review.get('reasons')}")
+        return ConversationHandler.END
+
+    context.bot.send_document(
+        chat_id=int(COMMUNITY_CHAT_ID),
+        message_thread_id=ARTICLES_TOPIC_ID,
+        document=doc.file_id,
+        caption="📝 مقال جديد — مرويات",
+        parse_mode="Markdown",
+    )
+
+    update.message.reply_text("✅ تم النشر")
+    return ConversationHandler.END
+
+def review_article_with_openai(text: str):
+    if client is None:
+        return {"approved": False, "reasons": "AI غير متاح"}
+
+    completion = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": ARTICLE_REVIEW_PROMPT},
+            {"role": "user", "content": text[:15000]},
+        ],
+        temperature=0.0,
+    )
+    return json.loads(completion.choices[0].message.content.strip())
 
 def get_user_id(update: Update) -> int:
     return update.effective_user.id
@@ -1633,6 +1703,17 @@ def main() -> None:
         allow_reentry=True,
     )
     dp.add_handler(redeem_conv)
+    article_conv = ConversationHandler(
+    entry_points=[CommandHandler("article_pdf", article_pdf_command)],
+        states={
+            STATE_ARTICLE_PDF: [
+                MessageHandler(Filters.document.pdf, handle_article_pdf)
+            ],
+        },
+        fallbacks=[],
+    )
+    dp.add_handler(article_conv)
+
 
     updater.start_polling()
     updater.idle()
