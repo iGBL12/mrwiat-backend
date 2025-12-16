@@ -56,7 +56,7 @@ RUNWAY_TASKS_URL = os.environ.get(
     "RUNWAY_TASKS_URL",
     "https://api.dev.runwayml.com/v1/tasks",
 )
-
+STORIES_TOPIC_ID = int(os.environ.get("STORIES_TOPIC_ID", "0"))
 COMMUNITY_CHAT_ID = os.environ.get("COMMUNITY_CHAT_ID")
 ARTICLES_TOPIC_ID = int(os.environ.get("ARTICLES_TOPIC_ID", "0"))
 STATE_ARTICLE_PDF = 50
@@ -322,9 +322,7 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
         )
         return STATE_ARTICLE_PDF
 
-    update.message.reply_text(
-        "🔍 جاري قراءة المقال ومراجعته، الرجاء الانتظار...",
-    )
+    update.message.reply_text("🔍 جاري قراءة المقال ومراجعته...")
 
     # ================== تحميل وقراءة PDF ==================
     try:
@@ -341,15 +339,13 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
     except Exception as e:
         logger.exception("PDF read error: %s", e)
         update.message.reply_text(
-            "❌ حدث خطأ أثناء قراءة ملف الـ PDF.\n"
-            "تأكد أن الملف غير تالف ثم حاول مرة أخرى."
+            "❌ حدث خطأ أثناء قراءة ملف الـ PDF."
         )
         return ConversationHandler.END
 
     if not text.strip():
         update.message.reply_text(
-            "❌ لم أتمكن من استخراج أي نص من ملف الـ PDF.\n"
-            "تأكد أن الملف يحتوي على نص قابل للقراءة."
+            "❌ لم أتمكن من استخراج أي نص من ملف الـ PDF."
         )
         return ConversationHandler.END
 
@@ -364,20 +360,28 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
         )
         return ConversationHandler.END
 
+    # ================== تجهيز اسم الكاتب ==================
+    user = update.effective_user
+    author_name = user.full_name or "كاتب مرويات"
+    author_username = f"@{user.username}" if user.username else author_name
+
     # ================== نشر المقال في القروب داخل Topic ==================
     try:
         context.bot.send_document(
             chat_id=int(COMMUNITY_CHAT_ID),
             message_thread_id=ARTICLES_TOPIC_ID,
             document=doc.file_id,
-            caption="📝 *مقال جديد*\n\n📚 مجتمع مرويات",
+            caption=(
+                "📝 *مقال جديد*\n\n"
+                f"✍️ الكاتب: {author_username}\n"
+                "📚 مجتمع مرويات"
+            ),
             parse_mode="Markdown",
         )
     except Exception as e:
         logger.exception("Send article PDF error: %s", e)
         update.message.reply_text(
-            "⚠️ تم قبول المقال، لكن حدث خطأ أثناء نشره في القروب.\n"
-            "سيتم مراجعته يدويًا من الإدارة.",
+            "⚠️ تم قبول المقال، لكن حدث خطأ أثناء نشره في القروب."
         )
         return ConversationHandler.END
 
@@ -842,42 +846,51 @@ def publish_command(update: Update, context: CallbackContext) -> int:
 def handle_pdf_story(update: Update, context: CallbackContext) -> int:
     doc = update.message.document
 
+    # ================== تحقق من وجود ملف PDF ==================
     if not doc or doc.mime_type != "application/pdf":
-        update.message.reply_text("❗ من فضلك أرسل ملف PDF صالح يحتوي على القصة.")
+        update.message.reply_text(
+            "❗ من فضلك أرسل ملف PDF صالح يحتوي على القصة."
+        )
         return STATE_PUBLISH_STORY
 
     user = update.effective_user
-    username = user.username or user.first_name or "قارئ مرويات"
+    author_name = user.full_name or "قارئ مرويات"
+    author_username = f"@{user.username}" if user.username else author_name
 
-    update.message.reply_text("📥 تم استلام ملف PDF، جاري استخلاص النص وتحليله...")
+    update.message.reply_text(
+        "📥 تم استلام ملف القصة.\n"
+        "🔍 جاري استخلاص النص ومراجعته قبل النشر..."
+    )
 
+    # ================== قراءة ملف PDF ==================
     try:
-        file = doc.get_file()
         bio = BytesIO()
-        file.download(out=bio)
+        doc.get_file().download(out=bio)
         bio.seek(0)
 
         reader = PyPDF2.PdfReader(bio)
         full_text = ""
+
         for page in reader.pages:
-            page_text = page.extract_text() or ""
-            full_text += page_text + "\n"
+            full_text += (page.extract_text() or "") + "\n"
 
     except Exception as e:
         logger.exception("PDF read error: %s", e)
-        update.message.reply_text("❌ حدث خطأ أثناء قراءة ملف الـPDF.")
+        update.message.reply_text(
+            "❌ حدث خطأ أثناء قراءة ملف الـ PDF."
+        )
         return ConversationHandler.END
 
     cleaned_text = full_text.strip()
     if not cleaned_text:
-        update.message.reply_text("❌ لم أتمكن من استخراج أي نص من ملف الـPDF.")
+        update.message.reply_text(
+            "❌ لم أتمكن من استخراج أي نص من ملف الـ PDF."
+        )
         return ConversationHandler.END
 
-    MAX_CHARS_FOR_REVIEW = 15000
-    if len(cleaned_text) > MAX_CHARS_FOR_REVIEW:
-        cleaned_text = cleaned_text[:MAX_CHARS_FOR_REVIEW]
+    # ================== مراجعة القصة بالذكاء الاصطناعي ==================
+    review = review_story_with_openai(cleaned_text, username=user.username or "")
 
-    review = review_story_with_openai(cleaned_text, username=username)
     approved = bool(review.get("approved"))
     word_count = int(review.get("word_count") or len(cleaned_text.split()))
     title = review.get("title") or "قصة من المجتمع"
@@ -886,57 +899,61 @@ def handle_pdf_story(update: Update, context: CallbackContext) -> int:
 
     if not approved:
         msg = (
-            f"🔎 تم تحليل قصتك من ملف الـPDF.\n"
+            f"🚫 *تم رفض القصة بعد المراجعة.*\n\n"
             f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n\n"
-            "🚫 النتيجة: *غير جاهزة للنشر حالياً*.\n"
         )
         if reasons:
-            msg += f"\nالسبب الرئيسي:\n{reasons}\n"
+            msg += f"📌 السبب:\n{reasons}\n"
         if suggestions:
-            msg += f"\nبعض الاقتراحات للتحسين:\n{suggestions}\n"
-        update.message.reply_text(msg, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
-        return ConversationHandler.END
+            msg += f"\n✍️ اقتراحات للتحسين:\n{suggestions}\n"
 
-    msg = (
-        f"✅ تم تحليل قصتك من ملف الـPDF.\n"
-        f"📊 عدد الكلمات التقريبي: *{word_count}* كلمة.\n"
-        "📣 النتيجة: *صالحة للنشر في قسم قصص المجتمع*.\n\n"
-        "🚀 سيتم الآن نشر ملف الـPDF في مجتمع مرويات باسمك."
-    )
-    update.message.reply_text(msg, parse_mode="Markdown")
-
-    if COMMUNITY_CHAT_ID:
-        try:
-            caption = (
-                f"📖 *{title}*\n"
-                f"✍️ من القارئ: @{username}\n\n"
-                "قسم: قصص المجتمع — منصة مرويات."
-            )
-            context.bot.send_document(
-                chat_id=int(COMMUNITY_CHAT_ID),
-                document=doc.file_id,
-                caption=caption,
-                parse_mode="Markdown",
-            )
-        except Exception as e:
-            logger.exception("Error sending PDF to community: %s", e)
-            update.message.reply_text(
-                "⚠️ تم قبول القصة، لكن حدث خطأ أثناء نشرها في المجتمع.",
-                reply_markup=MAIN_KEYBOARD,
-            )
-            return ConversationHandler.END
-    else:
         update.message.reply_text(
-            "✅ القصة مقبولة، لكن لم يتم ضبط COMMUNITY_CHAT_ID في الإعدادات.",
+            msg,
+            parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
 
+    # ================== التأكد من وجود Topic القصص ==================
+    if not STORIES_TOPIC_ID:
+        update.message.reply_text(
+            "⚠️ تم قبول القصة، لكن لم يتم ضبط قسم القصص (STORIES_TOPIC_ID).",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    # ================== نشر القصة داخل Topic القصص ==================
+    try:
+        caption = (
+            f"📖 *{title}*\n\n"
+            f"✍️ الكاتب: {author_username}\n"
+            "📚 قسم: قصص المجتمع — مرويات"
+        )
+
+        context.bot.send_document(
+            chat_id=int(COMMUNITY_CHAT_ID),
+            message_thread_id=STORIES_TOPIC_ID,
+            document=doc.file_id,
+            caption=caption,
+            parse_mode="Markdown",
+        )
+
+    except Exception as e:
+        logger.exception("Send story PDF error: %s", e)
+        update.message.reply_text(
+            "⚠️ تم قبول القصة، لكن حدث خطأ أثناء نشرها في القروب.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    # ================== تأكيد للمستخدم ==================
     update.message.reply_text(
-        "🎉 تم نشر قصتك في مجتمع مرويات بنجاح.\n"
-        "شكرًا لمشاركتك 🌟",
+        "🎉 تم نشر قصتك بنجاح في *قصص المجتمع* 🌟\n"
+        "شكرًا لمساهمتك في منصة مرويات.",
+        parse_mode="Markdown",
         reply_markup=MAIN_KEYBOARD,
     )
+
     return ConversationHandler.END
 
 
