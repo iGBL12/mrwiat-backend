@@ -557,13 +557,14 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
     filename = doc.file_name or ""
 
     # 2️⃣ تحقق من اسم الملف
-    if not filename.startswith("مقال |"):
+    if not filename.startswith("مقال -"):
         update.message.reply_text(
             "❌ اسم الملف غير صحيح.\n\n"
             "يجب أن يبدأ اسم الملف بـ:\n"
-            "`مقال | اسم المقال`\n\n"
+            "`مقال - اسم المقال`\n\n"
             "مثال:\n"
-            "`مقال | أثر القراءة على التفكير.pdf`",
+            "`مقال - أثر القراءة على التفكير.pdf`"
+,
             parse_mode="Markdown",
         )
         return ConversationHandler.END
@@ -647,7 +648,7 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
         return ConversationHandler.END
 
     try:
-        title = filename.replace(".pdf", "").replace("مقال |", "").strip()
+        title = filename.replace(".pdf", "").replace("مقال -", "").strip()
 
         caption = (
             f"📰 *{title}*\n"
