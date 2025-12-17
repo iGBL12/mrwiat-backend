@@ -3,6 +3,7 @@ import os
 import logging
 import json
 import time
+import base64
 from io import BytesIO
 from textwrap import wrap
 from datetime import datetime
@@ -1404,50 +1405,103 @@ def handle_video_duration(update: Update, context: CallbackContext) -> int:
 
 
 def handle_video_clarify(update: Update, context: CallbackContext) -> int:
+    # ================== قراءة رد المستخدم ==================
     extra = (update.message.text or "").strip()
-    idea = context.user_data.get("video_idea", "")
-    seconds = context.user_data.get("video_duration_seconds", 10)
-
     if not extra:
-        update.message.reply_text("❗ لم أستطع قراءة إجاباتك، أعد إرسالها من فضلك.")
+        update.message.reply_text(
+            "❗ لم أستطع قراءة تفاصيلك، أعد إرسالها من فضلك."
+        )
         return STATE_VIDEO_CLARIFY
+
+    # ================== استرجاع البيانات المحفوظة ==================
+    idea = context.user_data.get("video_idea", "")
+    seconds = context.user_data.get("video_duration_seconds")
+
+    if not idea:
+        update.message.reply_text(
+            "❌ فقدت فكرة الفيديو أثناء المحادثة.\n"
+            "رجاءً ابدأ من جديد باستخدام الأمر /video.",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    # حماية إضافية
+    if not seconds:
+        seconds = 10
+        context.user_data["video_duration_seconds"] = seconds
 
     user = update.effective_user
     username = user.username or user.first_name or "مستخدم"
 
-    update.message.reply_text("🔧 شكراً للتفاصيل! جاري تجهيز برومبت الفيديو النهائي...")
+    update.message.reply_text(
+        "🔧 شكرًا للتفاصيل! جاري تجهيز برومبت الفيديو النهائي..."
+    )
 
-    extra_info = extra + f"\n\nمدة الفيديو المرغوبة تقريباً: {seconds} ثانية."
-    result = refine_video_prompt_with_openai(idea, extra_info=extra_info, username=username)
+    # ================== دمج التوضيحات مع المدة ==================
+    extra_info = (
+        f"{extra}\n\n"
+        f"مدة الفيديو المرغوبة تقريباً: {seconds} ثانية."
+    )
+
+    result = refine_video_prompt_with_openai(
+        idea=idea,
+        extra_info=extra_info,
+        username=username,
+    )
+
     status = result.get("status")
 
+    # ================== ما زالت هناك تفاصيل ناقصة ==================
+    if status == "need_more":
+        questions = result.get("questions", [])
+
+        if not questions:
+            update.message.reply_text(
+                "لا تزال هناك بعض التفاصيل الناقصة عن الفيديو.\n"
+                "رجاءً صف الشخصيات والمكان وأسلوب التصوير والمزاج في رسالة واحدة."
+            )
+        else:
+            msg = "حتى أتمكن من إنشاء برومبت فيديو قوي، أحتاج منك توضيح:\n\n"
+            for q in questions:
+                msg += f"- {q}\n"
+            msg += "\n✍️ أرسل إجاباتك في رسالة واحدة."
+            update.message.reply_text(msg)
+
+        return STATE_VIDEO_CLARIFY
+
+    # ================== جاهز لإنشاء الفيديو ==================
     if status != "ok":
         update.message.reply_text(
-            "❌ لم أتمكن من إنشاء برومبت نهائي للفيديو. حاول وصف فكرتك مرة أخرى من البداية.",
+            "❌ حدث خطأ أثناء تجهيز برومبت الفيديو.\n"
+            "حاول إعادة وصف فكرتك من البداية باستخدام /video.",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
 
-    final_prompt = result.get("final_prompt", "")
+    final_prompt = (result.get("final_prompt") or "").strip()
     duration_seconds = int(result.get("duration_seconds", seconds))
     aspect_ratio = "1280:720"
 
+    # ================== حماية من برومبت فارغ ==================
     if not final_prompt:
         update.message.reply_text(
-            "حدث خطأ في توليد برومبت الفيديو. حاول وصف فكرتك مرة أخرى.",
+            "❌ البرومبت النهائي خرج فارغًا.\n"
+            "حاول إعادة وصف الفكرة بتفاصيل أكثر.",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
 
+    # ================== خصم النقاط ==================
     needed_points = get_video_cost_points(duration_seconds)
     if not require_and_deduct(update, needed_points):
         return ConversationHandler.END
 
     update.message.reply_text(
-        "✅ تم تجهيز برومبت احترافي للفيديو بعد الأخذ بتفاصيلك.\n"
-        "📤 الآن سأرسل الطلب إلى خدمة إنشاء الفيديو بالذكاء الاصطناعي ومتابعة حالته...",
+        "✅ تم تجهيز برومبت احترافي للفيديو.\n"
+        "📤 جاري إرسال الطلب إلى خدمة إنشاء الفيديو بالذكاء الاصطناعي ومتابعة حالته..."
     )
 
+    # ================== إرسال الطلب ==================
     send_runway_request_and_reply(
         update=update,
         context=context,
@@ -1600,19 +1654,14 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
     if not require_and_deduct(update, IMAGE_COST_POINTS):
         return ConversationHandler.END
 
-    update.message.reply_text("🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة بالذكاء الاصطناعي...")
+    update.message.reply_text(
+        "🎨 جاري تحويل وصفك إلى برومبت احترافي وإنشاء الصورة بالذكاء الاصطناعي..."
+    )
 
     refined_prompt = generate_image_prompt_with_openai(desc)
     if not refined_prompt:
         update.message.reply_text(
             "❌ حدث خطأ أثناء تجهيز برومبت الصورة. حاول مرة أخرى.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return ConversationHandler.END
-
-    if client is None:
-        update.message.reply_text(
-            "❌ خدمة إنشاء الصور بالذكاء الاصطناعي غير مفعّلة حالياً.",
             reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
@@ -1625,26 +1674,50 @@ def handle_image_prompt(update: Update, context: CallbackContext) -> int:
             n=1,
         )
 
-        if not img_resp.data or not getattr(img_resp.data[0], "url", None):
-            raise RuntimeError("No URL returned from image service")
+        data = img_resp.data[0]
 
-        image_url = img_resp.data[0].url
+        # ================== دعم Base64 ==================
+        if hasattr(data, "b64_json") and data.b64_json:
+            image_bytes = base64.b64decode(data.b64_json)
+            bio = BytesIO(image_bytes)
+            bio.name = "mrwiat_image.png"
+            bio.seek(0)
+
+            update.message.reply_photo(
+                photo=bio,
+                caption=(
+                    "🖼 هذه هي الصورة الناتجة عن وصفك بالذكاء الاصطناعي.\n"
+                    "إذا أعجبتك، يمكنك حفظها أو استخدامها كغلاف لقصة في مرويات."
+                ),
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return ConversationHandler.END
+
+        # ================== دعم URL (إن وُجد) ==================
+        if hasattr(data, "url") and data.url:
+            update.message.reply_photo(
+                photo=data.url,
+                caption=(
+                    "🖼 هذه هي الصورة الناتجة عن وصفك بالذكاء الاصطناعي."
+                ),
+                reply_markup=MAIN_KEYBOARD,
+            )
+            return ConversationHandler.END
+
+        raise RuntimeError("No image data returned")
 
     except Exception as e:
         logger.exception("AI image generation error: %s", e)
         update.message.reply_text(
-            f"❌ حدث خطأ أثناء توليد الصورة بخدمة الذكاء الاصطناعي:\n`{type(e).__name__}: {e}`",
-            parse_mode="Markdown",
+            "❌ حدث خطأ أثناء توليد الصورة.\n"
+            "تم إعادة النقاط إلى محفظتك.",
             reply_markup=MAIN_KEYBOARD,
         )
-        return ConversationHandler.END
 
-    caption = (
-        "🖼 هذه هي الصورة الناتجة عن وصفك بالذكاء الاصطناعي.\n"
-        "إذا أعجبتك، يمكنك حفظها أو استخدامها كغلاف لقصة في مرويات."
-    )
-    update.message.reply_photo(photo=image_url, caption=caption, reply_markup=MAIN_KEYBOARD)
-    return ConversationHandler.END
+        # ⛑ إعادة النقاط
+        add_user_points(get_user_id(update), IMAGE_COST_POINTS)
+
+        return ConversationHandler.END
 
 # =============== /cancel ===============
 
