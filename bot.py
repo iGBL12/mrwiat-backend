@@ -6,7 +6,7 @@ import time
 import base64
 from io import BytesIO
 from textwrap import wrap
-from datetime import datetime
+from datetime import datetime, timedelta
 import re
 
 from telegram import (
@@ -266,6 +266,41 @@ IMAGE_PROMPT_SYSTEM = """
 """
 
 # =============== دوال المستخدم والمحفظة ===============
+def mark_article_published_now(telegram_user_id: int) -> None:
+    """
+    تحديث وقت آخر مقال للمستخدم بعد النشر الناجح.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == telegram_user_id).first()
+        if user:
+            user.last_article_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+
+def can_publish_article_today(telegram_user_id: int) -> bool:
+    """
+    يسمح لكل مستخدم برفع مقال واحد فقط كل 24 ساعة.
+    """
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == telegram_user_id).first()
+
+        # مستخدم جديد
+        if not user:
+            return True
+
+        # لم ينشر مقالًا من قبل
+        if not user.last_article_at:
+            return True
+
+        # فرق الوقت أقل من 24 ساعة → مرفوض
+        return datetime.utcnow() - user.last_article_at >= timedelta(days=1)
+
+    finally:
+        db.close()
+
 def article_command(update: Update, context: CallbackContext) -> int:
     if update.effective_chat.type != "private":
         update.message.reply_text(
@@ -297,35 +332,47 @@ def article_pdf_command(update: Update, context: CallbackContext) -> int:
 
 
 def handle_article_pdf(update: Update, context: CallbackContext) -> int:
+    if update.effective_chat.type != "private":
+        update.message.reply_text("أرسل المقال في الخاص فقط.")
+        return ConversationHandler.END
+
+    user = update.effective_user
+
+    # ================== تحقق من الحد اليومي ==================
+    if not can_publish_article_today(user.id):
+        update.message.reply_text(
+            "⛔ يمكنك رفع *مقال واحد فقط كل 24 ساعة*.\n\n"
+            "🕒 حاول مرة أخرى لاحقًا.",
+            parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
+        )
+        return ConversationHandler.END
+
     doc = update.message.document
 
-    # ================== تحقق من وجود ملف PDF ==================
+    # ================== تحقق من PDF ==================
     if not doc or doc.mime_type != "application/pdf":
         update.message.reply_text(
-            "❗ من فضلك أرسل *ملف PDF فقط* لرفع المقال.",
+            "❗ من فضلك أرسل *ملف PDF فقط*.",
             parse_mode="Markdown",
         )
         return STATE_ARTICLE_PDF
 
-    # ================== شرط اسم الملف ==================
+    # ================== تحقق اسم الملف ==================
     file_name = (doc.file_name or "").strip()
 
     if not file_name.startswith("مقال -"):
         update.message.reply_text(
-            "❌ *اسم ملف المقال غير مطابق للشروط.*\n\n"
-            f"📄 اسم الملف الذي أرسلته:\n`{file_name}`\n\n"
-            "✅ الصيغة الصحيحة المطلوبة:\n"
-            "`مقال - اسم المقال.pdf`\n\n"
-            "📌 مثال صحيح:\n"
-            "`مقال - أثر القراءة على التركيز.pdf`\n\n"
-            "✍️ رجاءً أعد تسمية الملف ثم أرسله مرة أخرى.",
+            "❌ *اسم الملف غير مطابق للشروط.*\n\n"
+            "الصيغة الصحيحة:\n"
+            "`مقال - اسم المقال.pdf`",
             parse_mode="Markdown",
         )
         return STATE_ARTICLE_PDF
 
     update.message.reply_text("🔍 جاري قراءة المقال ومراجعته...")
 
-    # ================== تحميل وقراءة PDF ==================
+    # ================== قراءة PDF ==================
     try:
         bio = BytesIO()
         doc.get_file().download(out=bio)
@@ -339,18 +386,14 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
 
     except Exception as e:
         logger.exception("PDF read error: %s", e)
-        update.message.reply_text(
-            "❌ حدث خطأ أثناء قراءة ملف الـ PDF."
-        )
+        update.message.reply_text("❌ حدث خطأ أثناء قراءة ملف الـ PDF.")
         return ConversationHandler.END
 
     if not text.strip():
-        update.message.reply_text(
-            "❌ لم أتمكن من استخراج أي نص من ملف الـ PDF."
-        )
+        update.message.reply_text("❌ لم أتمكن من استخراج أي نص من الملف.")
         return ConversationHandler.END
 
-    # ================== مراجعة المقال بالذكاء الاصطناعي ==================
+    # ================== مراجعة المقال ==================
     review = review_article_with_openai(text)
 
     if not review.get("approved"):
@@ -358,15 +401,14 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
             "🚫 *تم رفض المقال بعد المراجعة.*\n\n"
             f"📌 السبب:\n{review.get('reasons')}",
             parse_mode="Markdown",
+            reply_markup=MAIN_KEYBOARD,
         )
         return ConversationHandler.END
 
-    # ================== تجهيز اسم الكاتب ==================
-    user = update.effective_user
+    # ================== نشر المقال ==================
     author_name = user.full_name or "كاتب مرويات"
     author_username = f"@{user.username}" if user.username else author_name
 
-    # ================== نشر المقال في القروب داخل Topic ==================
     try:
         context.bot.send_document(
             chat_id=int(COMMUNITY_CHAT_ID),
@@ -380,16 +422,19 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
             parse_mode="Markdown",
         )
     except Exception as e:
-        logger.exception("Send article PDF error: %s", e)
+        logger.exception("Send article error: %s", e)
         update.message.reply_text(
-            "⚠️ تم قبول المقال، لكن حدث خطأ أثناء نشره في القروب."
+            "⚠️ تم قبول المقال، لكن حدث خطأ أثناء نشره."
         )
         return ConversationHandler.END
 
-    # ================== تأكيد للمستخدم ==================
+    # ================== تحديث وقت آخر مقال ==================
+    mark_article_published_now(user.id)
+
+    # ================== تأكيد ==================
     update.message.reply_text(
-        "✅ تم نشر مقالك بنجاح بعد المراجعة 🌟\n"
-        "شكرًا لمساهمتك في مجتمع مرويات.",
+        "✅ تم نشر مقالك بنجاح 🌟\n"
+        "يمكنك رفع مقال جديد بعد 24 ساعة.",
         reply_markup=MAIN_KEYBOARD,
     )
 
