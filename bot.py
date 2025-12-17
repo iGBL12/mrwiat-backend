@@ -8,6 +8,7 @@ from io import BytesIO
 from textwrap import wrap
 from datetime import datetime, timedelta
 import re
+import unicodedata
 
 from telegram import (
     Update,
@@ -266,22 +267,45 @@ IMAGE_PROMPT_SYSTEM = """
 """
 
 # =============== دوال المستخدم والمحفظة ===============
+def normalize_filename(name: str) -> str:
+    """
+    تنظيف اسم الملف من:
+    - رموز RTL
+    - مسافات غير مرئية
+    - توحيد الشرطة
+    """
+    if not name:
+        return ""
+
+    # Unicode normalization
+    name = unicodedata.normalize("NFKC", name)
+
+    # إزالة رموز الاتجاه
+    name = re.sub(r"[\u200e\u200f\u202a-\u202e]", "", name)
+
+    # توحيد جميع أنواع الشرطة إلى "-"
+    name = re.sub(r"[‐-‒–—−]", "-", name)
+
+    # توحيد المسافات
+    name = re.sub(r"\s+", " ", name).strip()
+
+    return name
+
+
 def is_valid_article_filename(file_name: str) -> bool:
     """
-    يقبل الصيغ:
-    مقال - اسم.pdf
-    مقال-اسم.pdf
-    مقال -اسم.pdf
-    مقال- اسم.pdf
+    يقبل جميع الصيغ العربية الصحيحة لاسم المقال.
     """
     if not file_name:
         return False
-    if not file_name.lower().endswith(".pdf"):
+
+    cleaned = normalize_filename(file_name)
+
+    if not cleaned.lower().endswith(".pdf"):
         return False
 
     pattern = r"^مقال\s*-\s*.+\.pdf$"
-    return re.match(pattern, file_name.strip()) is not None
-
+    return re.match(pattern, cleaned) is not None
 def mark_article_published_now(telegram_user_id: int) -> None:
     """
     تحديث وقت آخر مقال للمستخدم بعد النشر الناجح.
@@ -348,17 +372,16 @@ def article_pdf_command(update: Update, context: CallbackContext) -> int:
 
 
 def handle_article_pdf(update: Update, context: CallbackContext) -> int:
-    # ================== تأكيد الخاص ==================
     if update.effective_chat.type != "private":
         update.message.reply_text("📝 لرفع مقال، تواصل معي في الخاص فقط.")
         return ConversationHandler.END
 
     user = update.effective_user
 
-    # ================== قيد مقال واحد يوميًا ==================
+    # ================== مقال واحد يوميًا ==================
     if not can_publish_article_today(user.id):
         update.message.reply_text(
-            "⛔ يمكنك رفع *مقال واحد فقط كل 24 ساعة*.\n\n"
+            "⛔ يمكنك رفع *مقال واحد فقط كل 24 ساعة*.\n"
             "🕒 حاول مرة أخرى لاحقًا.",
             parse_mode="Markdown",
             reply_markup=MAIN_KEYBOARD,
@@ -375,17 +398,17 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
         )
         return STATE_ARTICLE_PDF
 
-    # ================== تحقق اسم الملف (Regex مرن) ==================
-    file_name = (doc.file_name or "").strip()
-    if not is_valid_article_filename(file_name):
+    raw_name = doc.file_name or ""
+    cleaned_name = normalize_filename(raw_name)
+
+    # ================== تحقق اسم الملف ==================
+    if not is_valid_article_filename(raw_name):
         update.message.reply_text(
             "❌ *اسم ملف المقال غير مطابق للشروط.*\n\n"
             "✅ الصيغة الصحيحة:\n"
             "`مقال - اسم المقال.pdf`\n\n"
-            "📌 أمثلة مقبولة:\n"
-            "• مقال - أثر القراءة على التركيز.pdf\n"
-            "• مقال-الأكل الصحي.pdf\n"
-            "• مقال -الأكل الصحي.pdf\n",
+            "📌 اسم الملف الذي أرسلته:\n"
+            f"`{cleaned_name}`",
             parse_mode="Markdown",
         )
         return STATE_ARTICLE_PDF
@@ -400,6 +423,7 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
 
         reader = PyPDF2.PdfReader(bio)
         text = ""
+
         for page in reader.pages:
             text += (page.extract_text() or "") + "\n"
 
@@ -412,7 +436,7 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
         update.message.reply_text("❌ لم أتمكن من استخراج أي نص من الملف.")
         return ConversationHandler.END
 
-    # ================== مراجعة المقال بالذكاء الاصطناعي ==================
+    # ================== مراجعة المقال ==================
     review = review_article_with_openai(text)
 
     if not review.get("approved"):
@@ -424,43 +448,27 @@ def handle_article_pdf(update: Update, context: CallbackContext) -> int:
         )
         return ConversationHandler.END
 
-    # ================== نشر المقال في Topic المقالات ==================
+    # ================== نشر المقال ==================
     author_name = user.full_name or "كاتب مرويات"
     author_username = f"@{user.username}" if user.username else author_name
 
-    if not ARTICLES_TOPIC_ID:
-        update.message.reply_text(
-            "⚠️ تم قبول المقال، لكن لم يتم ضبط قسم المقالات (ARTICLES_TOPIC_ID).",
-            reply_markup=MAIN_KEYBOARD,
-        )
-        return ConversationHandler.END
+    context.bot.send_document(
+        chat_id=int(COMMUNITY_CHAT_ID),
+        message_thread_id=ARTICLES_TOPIC_ID,
+        document=doc.file_id,
+        caption=(
+            "📝 *مقال جديد*\n\n"
+            f"✍️ الكاتب: {author_username}\n"
+            "📚 مجتمع مرويات"
+        ),
+        parse_mode="Markdown",
+    )
 
-    try:
-        context.bot.send_document(
-            chat_id=int(COMMUNITY_CHAT_ID),
-            message_thread_id=ARTICLES_TOPIC_ID,
-            document=doc.file_id,
-            caption=(
-                "📝 *مقال جديد*\n\n"
-                f"✍️ الكاتب: {author_username}\n"
-                "📚 مجتمع مرويات"
-            ),
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        logger.exception("Send article error: %s", e)
-        update.message.reply_text(
-            "⚠️ تم قبول المقال، لكن حدث خطأ أثناء نشره في القروب."
-        )
-        return ConversationHandler.END
-
-    # ================== تحديث وقت آخر مقال ==================
+    # ================== تحديث الوقت ==================
     mark_article_published_now(user.id)
 
-    # ================== تأكيد للمستخدم ==================
     update.message.reply_text(
-        "✅ تم نشر مقالك بنجاح 🌟\n"
-        "يمكنك رفع مقال جديد بعد 24 ساعة.",
+        "✅ تم نشر مقالك بنجاح 🌟",
         reply_markup=MAIN_KEYBOARD,
     )
 
